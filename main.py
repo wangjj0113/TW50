@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
-# 【台股遠征計畫 v1.5.1 - 穩健資料清洗版】
+# 【台股遠征計畫 v1.5.2 - 網路強化版】
 # 修正日誌：
-# v1.5.1: 強化 get_tw_stock_info 函式。在讀取證交所CSV後，增加更穩健的
-#         資料清理步驟。明確將'公司代號'轉換為字串，並過濾掉任何可能
-#         導致後續查詢失敗的無效行，確保 stock_info_map 的可靠性。
+# v1.5.2: 針對 v1.5.1 的網路超時問題進行修正。
+#         1. 為 requests.get 增加明確的 timeout=30 參數，延長等待時間。
+#         2. 為整個 get_tw_stock_info 函式增加 @retry 裝飾器，
+#            當下載失敗時，會自動重試最多3次，極大提高成功率。
 
 import os
 import json
@@ -20,48 +21,46 @@ from io import StringIO
 
 # --- 核心設定 ---
 TAIPEI_TZ = pytz.timezone('Asia/Taipei')
-TWSE_L_URL = 'https://mopsfin.twse.com.tw/opendata/t187ap03_L.csv' # 上市
-TWSE_O_URL = 'https://mopsfin.twse.com.tw/opendata/t187ap03_O.csv' # 上櫃
+TWSE_L_URL = 'https://mopsfin.twse.com.tw/opendata/t187ap03_L.csv'
+TWSE_O_URL = 'https://mopsfin.twse.com.tw/opendata/t187ap03_O.csv'
 
-# --- 升級 v1.5.1: 獲取並整合台股基本資料 (更穩健的版本 ) ---
+# --- 升級 v1.5.2: 獲取台股基本資料 (增加重試與超時 ) ---
+@retry(stop_max_attempt_number=3, wait_fixed=5000) # 失敗後等5秒再重試，最多3次
 def get_tw_stock_info():
-    print("步驟 1/4: 正在從證交所下載最新的上市櫃公司名單...")
+    print("步驟 1/4: 正在從證交所下載最新的上市櫃公司名單 (網路強化版)...")
     try:
-        res_l = requests.get(TWSE_L_URL)
-        res_o = requests.get(TWSE_O_URL)
+        # 增加 timeout=30，將等待時間延長到30秒
+        res_l = requests.get(TWSE_L_URL, timeout=30)
+        res_o = requests.get(TWSE_O_URL, timeout=30)
         res_l.raise_for_status()
         res_o.raise_for_status()
 
+        print("...下載成功，正在進行資料清洗...")
         df_l = pd.read_csv(StringIO(res_l.text))
         df_o = pd.read_csv(StringIO(res_o.text))
-        
         df_all = pd.concat([df_l, df_o], ignore_index=True)
         
-        # --- 關鍵修正 v1.5.1 ---
-        print("...正在進行資料清洗與格式化...")
-        # 1. 篩選我們需要的欄位
         df_all = df_all[['公司代號', '公司簡稱', '產業別']]
-        # 2. 移除任何欄位為空的行，避免後續錯誤
         df_all.dropna(inplace=True)
-        # 3. 強制將 '公司代號' 轉換為字串，並處理可能出現的 ".0" 等浮點數問題
         df_all['公司代號'] = df_all['公司代號'].apply(lambda x: str(int(x)) if isinstance(x, float) else str(x))
-        # 4. 移除任何非數字的公司代號（例如 "股票代號" 這個標題行可能混進來）
         df_all = df_all[df_all['公司代號'].str.isdigit()]
-        # --- 修正結束 ---
 
         stock_info_map = df_all.set_index('公司代號')
         
         print(f"✅ 成功整合 {len(stock_info_map)} 家上市櫃公司基本資料。")
         return stock_info_map
 
+    except requests.exceptions.Timeout:
+        print("❌ 錯誤：下載時發生超時，將觸發自動重試...")
+        raise # 必須拋出異常，@retry 才會捕獲並重試
     except Exception as e:
-        print(f"❌ 錯誤：下載或處理台股基本資料時失敗: {e}")
-        return None
+        print(f"❌ 錯誤：下載或處理台股基本資料時失敗: {e}，將觸發自動重試...")
+        raise
 
 # --- Google Sheets 連線 (無變動) ---
 @retry(stop_max_attempt_number=3, wait_fixed=2000)
 def connect_to_google_sheet():
-    # ... 此處程式碼與上一版完全相同，為求簡潔省略 ...
+    # ... (程式碼與上一版完全相同) ...
     print("步驟 3/4: 準備初始化 Google Sheets 客戶端...")
     try:
         creds_json = os.getenv('GOOGLE_SERVICE_ACCOUNT_JSON')
@@ -81,7 +80,7 @@ def connect_to_google_sheet():
 
 # --- 核心分析函數 (無變動) ---
 def analyze_stock(ticker, stock_info_map):
-    # ... 此處程式碼與上一版完全相同，為求簡潔省略 ...
+    # ... (程式碼與上一版完全相同) ...
     stock_code = ticker.replace('.TW', '')
     print(f"--- 開始分析 {stock_code} ---")
     try:
@@ -107,16 +106,16 @@ def analyze_stock(ticker, stock_info_map):
 
 # --- 主控流程 (無變動) ---
 def main():
-    # ... 此處程式碼與上一版完全相同，為求簡潔省略 ...
+    # ... (程式碼與上一版完全相同) ...
     print("==============================================")
-    print(f"【台股遠征計畫 v1.5.1】啟動於 {datetime.now(TAIPEI_TZ).strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"【台股遠征計畫 v1.5.2】啟動於 {datetime.now(TAIPEI_TZ).strftime('%Y-%m-%d %H:%M:%S')}")
     print("==============================================")
     try:
         stock_info_map = get_tw_stock_info()
         if stock_info_map is None:
-            print("❌ 因無法獲取基本資料，任務終止。")
+            print("❌ 在多次重試後，仍無法獲取基本資料，任務終止。")
             return
-        print("步驟 2/4: 正在讀取 'taiwan_scan_list.json'...")
+        print("\n步驟 2/4: 正在讀取 'taiwan_scan_list.json'...")
         with open('taiwan_scan_list.json', 'r', encoding='utf-8') as f:
             stock_list_config = json.load(f)
         stock_list = stock_list_config.get("stocks", [])
