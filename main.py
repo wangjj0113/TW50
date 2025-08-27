@@ -1,11 +1,10 @@
 # -*- coding: utf-8 -*-
-# 【台股遠征計畫 v4.0 - 0050 動態抓取版】
+# 【台股遠征計畫 v4.1 - 持票入場版】
 # 修正日誌：
-# v4.0: 系統智能化重大升級！
-#       - 不再讀取本地的 `taiwan_scan_list.json` 檔案。
-#       - 新增 `get_0050_constituents` 函式，在每次執行時，
-#         自動透過 FinMind API 獲取最新的 0050 成分股清單。
-#       - 實現了真正的全自動化，無需再手動維護股票清單。
+# v4.1: 解決了 v4.0 中因缺少 FinMind API Token 導致的 422 錯誤。
+#       - 程式現在會從 GitHub Secrets 讀取 FINMIND_TOKEN。
+#       - 在請求 FinMind API 時，會自動將 Token 加入請求參數中。
+#       - 這是我們通往全自動化道路上的最後一張門票。
 
 import os
 import json
@@ -21,18 +20,22 @@ import requests
 
 # --- 核心設定 ---
 TAIPEI_TZ = pytz.timezone('Asia/Taipei')
-FINMIND_API_URL_INFO = "https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockInfo"
-FINMIND_API_URL_0050 = "https://api.finmindtrade.com/api/v4/data?dataset=TaiwanEtfComposition&data_id=0050"
+FINMIND_API_URL = "https://api.finmindtrade.com/api/v4/data"
 
-# --- 新增函式 v4.0：動態獲取 0050 成分股 ---
-@retry(stop_max_attempt_number=3, wait_fixed=3000 )
-def get_0050_constituents():
+# --- 新增函式 v4.1：動態獲取 0050 成分股 (持票入場版 ) ---
+@retry(stop_max_attempt_number=3, wait_fixed=3000)
+def get_0050_constituents(token):
     print("步驟 1/5: 正在從 FinMind API 動態獲取最新的 0050 成分股...")
     try:
-        res = requests.get(FINMIND_API_URL_0050, timeout=30)
+        params = {
+            'dataset': 'TaiwanEtfComposition',
+            'data_id': '0050',
+            'token': token  # --- 關鍵修改 v4.1：帶上我們的入場券 ---
+        }
+        res = requests.get(FINMIND_API_URL, params=params, timeout=30)
         res.raise_for_status()
         data = res.json()
-        if data['status'] != 200: raise Exception("FinMind API(0050) 回應狀態碼非 200")
+        if data['status'] != 200: raise Exception(f"FinMind API(0050) 回應錯誤: {data.get('msg')}")
         df = pd.DataFrame(data['data'])
         stock_list = df['stock_id'].tolist()
         print(f"✅ 成功獲取 {len(stock_list)} 支最新的 0050 成分股。")
@@ -41,15 +44,19 @@ def get_0050_constituents():
         print(f"❌ 錯誤：獲取 0050 成分股時失敗: {e}，將觸發自動重試...")
         raise
 
-# --- 獲取台股基本資料 (已驗證穩定) ---
+# --- 獲取台股基本資料 (持票入場版) ---
 @retry(stop_max_attempt_number=3, wait_fixed=3000)
-def get_tw_stock_info():
+def get_tw_stock_info(token):
     print("步驟 2/5: 正在從 FinMind API 獲取台股基本資料...")
     try:
-        res = requests.get(FINMIND_API_URL_INFO, timeout=30)
+        params = {
+            'dataset': 'TaiwanStockInfo',
+            'token': token # 雖然目前免費，但帶上 Token 是好習慣
+        }
+        res = requests.get(FINMIND_API_URL, params=params, timeout=30)
         res.raise_for_status()
         data = res.json()
-        if data['status'] != 200: raise Exception("FinMind API(Info) 回應狀態碼非 200")
+        if data['status'] != 200: raise Exception(f"FinMind API(Info) 回應錯誤: {data.get('msg')}")
         df = pd.DataFrame(data['data'])
         df = df[['stock_id', 'stock_name', 'industry_category']]
         df.rename(columns={'stock_id': '公司代號', 'stock_name': '公司簡稱', 'industry_category': '產業別'}, inplace=True)
@@ -100,18 +107,23 @@ def analyze_stock(ticker, stock_info_map):
     except KeyError: return None
     except Exception as e: return None
 
-# --- 主控流程 (v4.0 動態抓取版) ---
+# --- 主控流程 (v4.1 持票入場版) ---
 def main():
     print("==============================================")
-    print(f"【台股遠征計畫 v4.0】啟動於 {datetime.now(TAIPEI_TZ).strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"【台股遠征計畫 v4.1】啟動於 {datetime.now(TAIPEI_TZ).strftime('%Y-%m-%d %H:%M:%S')}")
     print("==============================================")
     try:
-        stock_list = get_0050_constituents()
+        finmind_token = os.getenv('FINMIND_TOKEN')
+        if not finmind_token:
+            print("❌ 致命錯誤：環境變數 FINMIND_TOKEN 未設定！請在 GitHub Secrets 中設定。")
+            return
+
+        stock_list = get_0050_constituents(finmind_token)
         if not stock_list:
             print("❌ 獲取 0050 成分股失敗，任務終止。")
             return
 
-        stock_info_map = get_tw_stock_info()
+        stock_info_map = get_tw_stock_info(finmind_token)
         if stock_info_map is None: return
 
         print("\n步驟 3/5: 開始逐一分析成分股...")
