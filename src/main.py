@@ -65,7 +65,7 @@ def fetch_with_indicators(ticker: str, period: str, interval: str, cfg) -> pd.Da
     cols = ["Date","Ticker","Open","High","Low","Close","Volume",
             f"RSI_{rsi_len}"] + [f"SMA_{w}" for w in cfg.get("sma_windows", [20,50,200])] +            [f"BB_{bb_len}_Basis", f"BB_{bb_len}_Upper", f"BB_{bb_len}_Lower", f"BB_{bb_len}_Width"]
 
-    return df.loc[:, [c for c in cols if c in df.columns)]
+    return df.loc[:, [c for c in cols if c in df.columns]
 
 # ---- Google Sheets ----
 def gspread_client():
