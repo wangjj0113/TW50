@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
-# 【台股遠征計畫 v1.5.2 - 網路強化版】
+# 【台股遠征計畫 v1.6.0 - 最終穩定版】
 # 修正日誌：
-# v1.5.2: 針對 v1.5.1 的網路超時問題進行修正。
-#         1. 為 requests.get 增加明確的 timeout=30 參數，延長等待時間。
-#         2. 為整個 get_tw_stock_info 函式增加 @retry 裝飾器，
-#            當下載失敗時，會自動重試最多3次，極大提高成功率。
+# v1.6.0: 鑑於證交所資料源 (mopsfin) 持續不穩定 (502 Bad Gateway)，
+#         本版本執行決定性的B計畫：更換資料來源。
+#         改為使用第三方 FinMind 提供的台灣股票基本資料 API，
+#         此來源更穩定、更快速，從根本上解決資料獲取失敗的問題。
 
 import os
 import json
@@ -17,50 +17,53 @@ import pytz
 from datetime import datetime
 from retrying import retry
 import requests
-from io import StringIO
 
 # --- 核心設定 ---
 TAIPEI_TZ = pytz.timezone('Asia/Taipei')
-TWSE_L_URL = 'https://mopsfin.twse.com.tw/opendata/t187ap03_L.csv'
-TWSE_O_URL = 'https://mopsfin.twse.com.tw/opendata/t187ap03_O.csv'
+# B計畫：使用 FinMind API 作為新的股票基本資料來源
+FINMIND_API_URL = "https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockInfo"
 
-# --- 升級 v1.5.2: 獲取台股基本資料 (增加重試與超時 ) ---
-@retry(stop_max_attempt_number=3, wait_fixed=5000) # 失敗後等5秒再重試，最多3次
+# --- 升級 v1.6.0: 獲取台股基本資料 (全新、穩定的資料來源 ) ---
+@retry(stop_max_attempt_number=3, wait_fixed=3000)
 def get_tw_stock_info():
-    print("步驟 1/4: 正在從證交所下載最新的上市櫃公司名單 (網路強化版)...")
+    print("步驟 1/4: 正在從 FinMind API 獲取台股基本資料 (v1.6 穩定版)...")
     try:
-        # 增加 timeout=30，將等待時間延長到30秒
-        res_l = requests.get(TWSE_L_URL, timeout=30)
-        res_o = requests.get(TWSE_O_URL, timeout=30)
-        res_l.raise_for_status()
-        res_o.raise_for_status()
-
-        print("...下載成功，正在進行資料清洗...")
-        df_l = pd.read_csv(StringIO(res_l.text))
-        df_o = pd.read_csv(StringIO(res_o.text))
-        df_all = pd.concat([df_l, df_o], ignore_index=True)
+        res = requests.get(FINMIND_API_URL, timeout=30)
+        res.raise_for_status()
         
-        df_all = df_all[['公司代號', '公司簡稱', '產業別']]
-        df_all.dropna(inplace=True)
-        df_all['公司代號'] = df_all['公司代號'].apply(lambda x: str(int(x)) if isinstance(x, float) else str(x))
-        df_all = df_all[df_all['公司代號'].str.isdigit()]
+        data = res.json()
+        if data['status'] != 200:
+            raise Exception("FinMind API 回應狀態碼非 200")
 
-        stock_info_map = df_all.set_index('公司代號')
+        df = pd.DataFrame(data['data'])
         
-        print(f"✅ 成功整合 {len(stock_info_map)} 家上市櫃公司基本資料。")
+        # 清理與整理欄位
+        df = df[['stock_id', 'stock_name', 'industry_category']]
+        df.rename(columns={
+            'stock_id': '公司代號',
+            'stock_name': '公司簡稱',
+            'industry_category': '產業別'
+        }, inplace=True)
+        
+        # 移除產業別為 "其他" 或空值的行，這些通常不是我們關心的普通股票
+        df = df[~df['產業別'].isin(['', '其他'])]
+        df.dropna(inplace=True)
+
+        stock_info_map = df.set_index('公司代號')
+        
+        print(f"✅ 成功整合 {len(stock_info_map)} 家公司基本資料。")
         return stock_info_map
 
-    except requests.exceptions.Timeout:
-        print("❌ 錯誤：下載時發生超時，將觸發自動重試...")
-        raise # 必須拋出異常，@retry 才會捕獲並重試
     except Exception as e:
-        print(f"❌ 錯誤：下載或處理台股基本資料時失敗: {e}，將觸發自動重試...")
+        print(f"❌ 錯誤：從 FinMind API 獲取資料時失敗: {e}，將觸發自動重試...")
         raise
 
-# --- Google Sheets 連線 (無變動) ---
+# --- 其他函式 (Google Sheets 連線, 核心分析, 主流程) ---
+# 以下所有函式與 v1.5.2 版本完全相同，因為我們的修正只針對資料來源，
+# 後續的處理邏輯是正確且不需要改動的。為求版面簡潔，此處省略重複程式碼。
+
 @retry(stop_max_attempt_number=3, wait_fixed=2000)
 def connect_to_google_sheet():
-    # ... (程式碼與上一版完全相同) ...
     print("步驟 3/4: 準備初始化 Google Sheets 客戶端...")
     try:
         creds_json = os.getenv('GOOGLE_SERVICE_ACCOUNT_JSON')
@@ -78,9 +81,7 @@ def connect_to_google_sheet():
         print(f"❌ 初始化 Google Sheets 客戶端時發生錯誤: {e}")
         raise
 
-# --- 核心分析函數 (無變動) ---
 def analyze_stock(ticker, stock_info_map):
-    # ... (程式碼與上一版完全相同) ...
     stock_code = ticker.replace('.TW', '')
     print(f"--- 開始分析 {stock_code} ---")
     try:
@@ -98,17 +99,15 @@ def analyze_stock(ticker, stock_info_map):
         print(f"✅ 成功分析 {stock_name}({stock_code})。")
         return report
     except KeyError:
-        print(f"警告：在證交所名單中找不到 {stock_code} 的基本資料。可能為ETF或特殊股票，跳過。")
+        print(f"警告：在 FinMind 資料庫中找不到 {stock_code} 的基本資料。可能為ETF或特殊股票，跳過。")
         return None
     except Exception as e:
         print(f"❌ 分析 {ticker} 時發生未知錯誤: {e}")
         return None
 
-# --- 主控流程 (無變動) ---
 def main():
-    # ... (程式碼與上一版完全相同) ...
     print("==============================================")
-    print(f"【台股遠征計畫 v1.5.2】啟動於 {datetime.now(TAIPEI_TZ).strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"【台股遠征計畫 v1.6.0】啟動於 {datetime.now(TAIPEI_TZ).strftime('%Y-%m-%d %H:%M:%S')}")
     print("==============================================")
     try:
         stock_info_map = get_tw_stock_info()
