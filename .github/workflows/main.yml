@@ -1,30 +1,39 @@
-name: TW-Stock King's Analysis v5.0 (Self-Reliant)
+name: TA-to-Sheets
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "30 0,10 * * *"   # UTC；台灣 +8 → 每天 08:30、18:30
 
 jobs:
-  build:
+  run:
     runs-on: ubuntu-latest
-
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.10'
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
 
-    - name: Install Core Dependencies
-      run: |
-        python -m pip install --upgrade pip
-        # --- 關鍵修正：徹底移除 pandas-ta，只安裝最核心、最穩定的函式庫 ---
-        pip install pandas numpy yfinance gspread google-auth-oauthlib google-api-python-client pytz retrying requests
+      - name: Upgrade pip tooling
+        run: |
+          python -m pip install --upgrade "pip<24" "setuptools<70" wheel
 
-    - name: Run The King's Analysis (TW)
-      env:
-        GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-        SHEET_ID: ${{ secrets.SHEET_ID }}
-        FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
-      run: python -u main.py
+      - name: Install dependencies
+        run: |
+          pip install --no-cache-dir --upgrade --force-reinstall -r requirements.txt
+          python -c "import numpy, pandas, yfinance; print('NumPy=', numpy.__version__, 'Pandas=', pandas.__version__)"          
+
+      - name: Write service account key
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+        run: |
+          echo "$GOOGLE_SERVICE_ACCOUNT_JSON" > $RUNNER_TEMP/sa.json
+
+      - name: Run script
+        env:
+          GOOGLE_APPLICATION_CREDENTIALS: ${{ runner.temp }}/sa.json
+        run: |
+          python src/main.py
