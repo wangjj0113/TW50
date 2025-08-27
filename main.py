@@ -1,10 +1,9 @@
 # -*- coding: utf-8 -*-
-# 【台股遠征計畫 v2.1 - 格式化修正・勝利版】
+# 【台股遠征計畫 v3.0 - 靈活清單版】
 # 修正日誌：
-# v2.1: 針對 v2.0 執行時最後一步的 'not JSON serializable' 錯誤進行修正。
-#       在將 DataFrame 轉換為列表前，增加一步 .astype(str) 操作，
-#       將所有欄位強制轉換為字串格式，確保 gspread 函式庫可以正確處理。
-#       這是我們勝利前的最後一塊拼圖。
+# v3.0: 第一階段基礎建設完成！本版本恢復了系統的靈活性。
+#       移除硬編碼的股票清單，改回讀取外部的 `taiwan_scan_list.json` 檔案。
+#       使用者現在可以透過修改 JSON 檔案，自由定義要分析的股票範圍。
 
 import os
 import json
@@ -22,15 +21,10 @@ import requests
 TAIPEI_TZ = pytz.timezone('Asia/Taipei')
 FINMIND_API_URL = "https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockInfo"
 
-# --- 硬編碼股票清單 ---
-HARDCODED_STOCK_LIST = [
-    "2330", "2454", "2317", "2303", "2881", "2882", "1301", "1303"
-]
-
 # --- 獲取台股基本資料 (已驗證穩定 ) ---
 @retry(stop_max_attempt_number=3, wait_fixed=3000)
 def get_tw_stock_info():
-    print("步驟 1/3: 正在從 FinMind API 獲取台股基本資料...")
+    print("步驟 1/4: 正在從 FinMind API 獲取台股基本資料...")
     try:
         res = requests.get(FINMIND_API_URL, timeout=30)
         res.raise_for_status()
@@ -50,7 +44,7 @@ def get_tw_stock_info():
 # --- Google Sheets 連線 (已驗證穩定) ---
 @retry(stop_max_attempt_number=3, wait_fixed=2000)
 def connect_to_google_sheet():
-    print("步驟 2/3: 準備初始化 Google Sheets 客戶端...")
+    print("步驟 3/4: 準備初始化 Google Sheets 客戶端...")
     try:
         creds_json = os.getenv('GOOGLE_SERVICE_ACCOUNT_JSON')
         if not creds_json: raise ValueError("錯誤：環境變數 GOOGLE_SERVICE_ACCOUNT_JSON 未設定。")
@@ -86,17 +80,26 @@ def analyze_stock(ticker, stock_info_map):
     except KeyError: return None
     except Exception as e: return None
 
-# --- 主控流程 (v2.1 最終修正) ---
+# --- 主控流程 (v3.0 靈活清單版) ---
 def main():
     print("==============================================")
-    print(f"【台股遠征計畫 v2.1】啟動於 {datetime.now(TAIPEI_TZ).strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"【台股遠征計畫 v3.0】啟動於 {datetime.now(TAIPEI_TZ).strftime('%Y-%m-%d %H:%M:%S')}")
     print("==============================================")
     try:
         stock_info_map = get_tw_stock_info()
         if stock_info_map is None: return
 
-        stock_list = HARDCODED_STOCK_LIST
-        print(f"✅ 使用硬編碼股票清單，共 {len(stock_list)} 支。")
+        # --- 關鍵修改 v3.0：恢復讀取 JSON 檔案 ---
+        print("\n步驟 2/4: 正在讀取 'taiwan_scan_list.json'...")
+        with open('taiwan_scan_list.json', 'r', encoding='utf-8') as f:
+            stock_list_config = json.load(f)
+        stock_list = stock_list_config.get("stocks", [])
+        # --- 修改結束 ---
+        
+        if not stock_list:
+            print("❌ 錯誤：'taiwan_scan_list.json' 中未找到股票清單或清單為空。")
+            return
+        print(f"✅ 成功讀取 {len(stock_list)} 支待分析股票。")
         
         all_reports = []
         for stock_code in stock_list:
@@ -113,27 +116,22 @@ def main():
         spreadsheet = connect_to_google_sheet()
         worksheet_name = f"王者報告_{datetime.now(TAIPEI_TZ).strftime('%Y%m%d')}"
         
-        print(f"步驟 3/3: 準備寫入資料至工作表: '{worksheet_name}'...")
+        print(f"步驟 4/4: 準備寫入資料至工作表: '{worksheet_name}'...")
         try:
             worksheet = spreadsheet.worksheet(worksheet_name)
             worksheet.clear()
         except gspread.WorksheetNotFound:
-            worksheet = spreadsheet.add_worksheet(title=worksheet_name, rows="100", cols="30")
+            worksheet = spreadsheet.add_worksheet(title=worksheet_name, rows=str(len(all_reports) + 50), cols="30")
             
         df = pd.DataFrame(all_reports)
         column_order = ["掃描時間(TW)", "產業類別", "股票代號", "股票名稱", "當前股價", "RSI(14)", "SMA(20)", "SMA(50)", "SMA(200)", "布林上軌", "布林下軌"]
         df = df[column_order]
-
-        # --- 關鍵修正 v2.1 ---
-        # 在寫入前，將整個 DataFrame 的所有內容都轉換為字串，確保 gspread 不會出錯
         df_to_write = df.astype(str)
-        # --- 修正結束 ---
-
         data_to_write = [df_to_write.columns.values.tolist()] + df_to_write.values.tolist()
         
         worksheet.update(data_to_write, range_name='A1')
         print(f"✅ 成功將 {len(df)} 筆數據寫入 '{worksheet_name}'！")
-        print("🎉🎉🎉 任務圓滿成功！我們做到了！🎉🎉🎉")
+        print("🎉🎉🎉 任務圓滿成功！🎉🎉🎉")
 
     except Exception as e:
         print(f"❌ 主流程發生致命錯誤: {e}")
