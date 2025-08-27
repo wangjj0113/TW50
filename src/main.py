@@ -6,14 +6,17 @@ import yfinance as yf
 import gspread
 from google.oauth2.service_account import Credentials
 
-ROOT = os.path.dirname(os.path.abspath(__file__))
-CFG_PATH = os.path.join(os.path.dirname(ROOT), "config.json")
+# repo 結構：
+#   /config.json   ← 在 repo 根目錄
+#   /src/main.py   ← 這隻程式
+HERE = os.path.dirname(os.path.abspath(__file__))
+CFG_PATH = os.path.join(os.path.dirname(HERE), "config.json")
 
 def load_cfg():
     with open(CFG_PATH, "r", encoding="utf-8") as f:
         return json.load(f)
 
-# ---- 技術指標 ----
+# ---------- 技術指標 ----------
 def sma(s: pd.Series, window: int) -> pd.Series:
     return s.rolling(window=window, min_periods=window).mean()
 
@@ -34,7 +37,7 @@ def bbands(s: pd.Series, length: int = 20, k: float = 2.0):
     width = (upper - lower) / basis
     return basis, upper, lower, width
 
-# ---- 資料抓取 + 指標計算 ----
+# ---------- 資料抓取 + 指標計算 ----------
 def fetch_with_indicators(ticker: str, period: str, interval: str, cfg) -> pd.DataFrame:
     df = yf.download(ticker, period=period, interval=interval, auto_adjust=False, progress=False)
     if df.empty:
@@ -62,49 +65,7 @@ def fetch_with_indicators(ticker: str, period: str, interval: str, cfg) -> pd.Da
     df.insert(0, "Ticker", ticker)
     df.reset_index(inplace=True)  # 把 Date 變成欄位
 
-    cols = ["Date","Ticker","Open","High","Low","Close","Volume",
-            f"RSI_{rsi_len}"] + [f"SMA_{w}" for w in cfg.get("sma_windows", [20,50,200])] +            [f"BB_{bb_len}_Basis", f"BB_{bb_len}_Upper", f"BB_{bb_len}_Lower", f"BB_{bb_len}_Width"]
-
-    return df.loc[:, [c for c in cols if c in df.columns]
-
-# ---- Google Sheets ----
-def gspread_client():
-    sa_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
-    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
-    creds = Credentials.from_service_account_file(sa_path, scopes=scopes)
-    return gspread.authorize(creds)
-
-def write_dataframe(ws, df: pd.DataFrame):
-    values = [df.columns.tolist()] + df.astype(object).where(pd.notna(df), "").values.tolist()
-    ws.clear()
-    ws.update(values, value_input_option="RAW")
-
-def main():
-    cfg = load_cfg()
-    tickers: List[str] = cfg["tickers"]
-    period = cfg.get("period", "6mo")
-    interval = cfg.get("interval", "1d")
-
-    frames = []
-    for t in tickers:
-        df = fetch_with_indicators(t, period, interval, cfg)
-        if not df.empty:
-            frames.append(df)
-
-    if not frames:
-        raise RuntimeError("No data fetched for any ticker.")
-
-    out = pd.concat(frames, ignore_index=True)
-
-    gc = gspread_client()
-    sh = gc.open_by_key(cfg["sheet_id"])
-    try:
-        ws = sh.worksheet(cfg["worksheet"])
-    except gspread.WorksheetNotFound:
-        ws = sh.add_worksheet(title=cfg["worksheet"], rows="100", cols="26")
-
-    write_dataframe(ws, out)
-    print(f"Done. Rows: {len(out)} | Cols: {len(out.columns)}")
-
-if __name__ == "__main__":
-    main()
+    cols = [
+        "Date","Ticker","Open","High","Low","Close","Volume",
+        f"RSI_{rsi_len}"
+    ] + [f"SMA_{w}" for w in cfg.get("sma_windows",]()
