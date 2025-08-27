@@ -68,4 +68,52 @@ def fetch_with_indicators(ticker: str, period: str, interval: str, cfg) -> pd.Da
     cols = [
         "Date","Ticker","Open","High","Low","Close","Volume",
         f"RSI_{rsi_len}"
-    ] + [f"SMA_{w}" for w in cfg.get("sma_windows",]()
+    ] + [f"SMA_{w}" for w in cfg.get("sma_windows", [20, 50, 200])] + [
+        f"BB_{bb_len}_Basis", f"BB_{bb_len}_Upper", f"BB_{bb_len}_Lower", f"BB_{bb_len}_Width"
+    ]
+
+    return df.loc[:, [c for c in cols if c in df.columns]]
+
+# ---------- Google Sheets ----------
+def gspread_client():
+    sa_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
+    if not sa_path or not os.path.exists(sa_path):
+        raise RuntimeError("找不到 Service Account 憑證，請設定環境變數 GOOGLE_APPLICATION_CREDENTIALS 指向 JSON 檔案。")
+    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+    creds = Credentials.from_service_account_file(sa_path, scopes=scopes)
+    return gspread.authorize(creds)
+
+def write_dataframe(ws, df: pd.DataFrame):
+    values = [df.columns.tolist()] + df.astype(object).where(pd.notna(df), "").values.tolist()
+    ws.clear()
+    ws.update(values, value_input_option="RAW")
+
+def main():
+    cfg = load_cfg()
+    tickers: List[str] = cfg.get("tickers", [])
+    period = cfg.get("period", "6mo")
+    interval = cfg.get("interval", "1d")
+
+    frames = []
+    for t in tickers:
+        df = fetch_with_indicators(t, period, interval, cfg)
+        if not df.empty:
+            frames.append(df)
+
+    if not frames:
+        raise RuntimeError("No data fetched for any ticker.")
+
+    out = pd.concat(frames, ignore_index=True)
+
+    gc = gspread_client()
+    sh = gc.open_by_key(cfg["sheet_id"])
+    try:
+        ws = sh.worksheet(cfg["worksheet"])
+    except gspread.WorksheetNotFound:
+        ws = sh.add_worksheet(title=cfg["worksheet"], rows="100", cols="26")
+
+    write_dataframe(ws, out)
+    print(f"Done. Rows: {len(out)} | Cols: {len(out.columns)}")
+
+if __name__ == "__main__":
+    main()
