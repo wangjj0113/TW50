@@ -24,7 +24,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --no-cache-dir --upgrade --force-reinstall -r requirements.txt
-          python -c "import numpy, pandas, yfinance; print('NumPy=', numpy.__version__, 'Pandas=', pandas.__version__)"          
+          python -c "import numpy, pandas, requests; print('NumPy=', numpy.__version__, 'Pandas=', pandas.__version__, 'Requests=', requests.__version__)"          
 
       - name: Write service account key
         env:
@@ -35,5 +35,7 @@ jobs:
       - name: Run script
         env:
           GOOGLE_APPLICATION_CREDENTIALS: ${{ runner.temp }}/sa.json
+          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}   # 加這行，讓程式能讀到 Token
+          SHEET_ID: ${{ secrets.SHEET_ID }}             # 如果 main.py 有用到的話，一併加上
         run: |
           python src/main.py
