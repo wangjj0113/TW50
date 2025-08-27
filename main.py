@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
-# 【台股遠征計畫 v2.0 - 硬編碼穩定測試版】
+# 【台股遠征計畫 v2.1 - 格式化修正・勝利版】
 # 修正日誌：
-# v2.0: 為了徹底排除 GitHub Actions 的檔案快取或同步問題，本版本採用
-#       終極的「硬編碼」策略。不再讀取外部的 taiwan_scan_list.json 檔案，
-#       而是將要分析的股票清單直接寫在程式碼中。這將確保執行的邏輯
-#       100% 是我們所見的，沒有任何外部變數。
+# v2.1: 針對 v2.0 執行時最後一步的 'not JSON serializable' 錯誤進行修正。
+#       在將 DataFrame 轉換為列表前，增加一步 .astype(str) 操作，
+#       將所有欄位強制轉換為字串格式，確保 gspread 函式庫可以正確處理。
+#       這是我們勝利前的最後一塊拼圖。
 
 import os
 import json
@@ -22,14 +22,12 @@ import requests
 TAIPEI_TZ = pytz.timezone('Asia/Taipei')
 FINMIND_API_URL = "https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockInfo"
 
-# --- 硬編碼股票清單 (不再讀取 JSON 檔案 ) ---
-# 姐姐，您可以直接在這裡修改您想分析的股票
-# 我先用幾支代表性的股票來做測試
+# --- 硬編碼股票清單 ---
 HARDCODED_STOCK_LIST = [
-    "2330", "2454", "2317", "2881", "2882", "1301", "1303"
+    "2330", "2454", "2317", "2303", "2881", "2882", "1301", "1303"
 ]
 
-# --- 獲取台股基本資料 (此函式已驗證穩定，無須修改) ---
+# --- 獲取台股基本資料 (已驗證穩定 ) ---
 @retry(stop_max_attempt_number=3, wait_fixed=3000)
 def get_tw_stock_info():
     print("步驟 1/3: 正在從 FinMind API 獲取台股基本資料...")
@@ -49,7 +47,7 @@ def get_tw_stock_info():
         print(f"❌ 錯誤：從 FinMind API 獲取資料時失敗: {e}，將觸發自動重試...")
         raise
 
-# --- Google Sheets 連線 (無變動) ---
+# --- Google Sheets 連線 (已驗證穩定) ---
 @retry(stop_max_attempt_number=3, wait_fixed=2000)
 def connect_to_google_sheet():
     print("步驟 2/3: 準備初始化 Google Sheets 客戶端...")
@@ -69,7 +67,7 @@ def connect_to_google_sheet():
         print(f"❌ 初始化 Google Sheets 客戶端時發生錯誤: {e}")
         raise
 
-# --- 核心分析函數 (無變動) ---
+# --- 核心分析函數 (已驗證穩定) ---
 def analyze_stock(ticker, stock_info_map):
     stock_code = ticker.replace('.TW', '')
     print(f"--- 開始分析 {stock_code} ---")
@@ -88,16 +86,15 @@ def analyze_stock(ticker, stock_info_map):
     except KeyError: return None
     except Exception as e: return None
 
-# --- 主控流程 (v2.0 硬編碼版) ---
+# --- 主控流程 (v2.1 最終修正) ---
 def main():
     print("==============================================")
-    print(f"【台股遠征計畫 v2.0】啟動於 {datetime.now(TAIPEI_TZ).strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"【台股遠征計畫 v2.1】啟動於 {datetime.now(TAIPEI_TZ).strftime('%Y-%m-%d %H:%M:%S')}")
     print("==============================================")
     try:
         stock_info_map = get_tw_stock_info()
         if stock_info_map is None: return
 
-        # 直接使用硬編碼的列表，不再讀取檔案
         stock_list = HARDCODED_STOCK_LIST
         print(f"✅ 使用硬編碼股票清單，共 {len(stock_list)} 支。")
         
@@ -126,11 +123,17 @@ def main():
         df = pd.DataFrame(all_reports)
         column_order = ["掃描時間(TW)", "產業類別", "股票代號", "股票名稱", "當前股價", "RSI(14)", "SMA(20)", "SMA(50)", "SMA(200)", "布林上軌", "布林下軌"]
         df = df[column_order]
-        data_to_write = [df.columns.values.tolist()] + df.values.tolist()
+
+        # --- 關鍵修正 v2.1 ---
+        # 在寫入前，將整個 DataFrame 的所有內容都轉換為字串，確保 gspread 不會出錯
+        df_to_write = df.astype(str)
+        # --- 修正結束 ---
+
+        data_to_write = [df_to_write.columns.values.tolist()] + df_to_write.values.tolist()
         
         worksheet.update(data_to_write, range_name='A1')
         print(f"✅ 成功將 {len(df)} 筆數據寫入 '{worksheet_name}'！")
-        print("🎉 任務圓滿成功！")
+        print("🎉🎉🎉 任務圓滿成功！我們做到了！🎉🎉🎉")
 
     except Exception as e:
         print(f"❌ 主流程發生致命錯誤: {e}")
