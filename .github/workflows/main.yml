@@ -1,4 +1,4 @@
-name: TW-Stock King's Analysis v1.0
+name: TW-Stock King's Analysis v1.1 (Numpy Hotfix)
 
 on:
   workflow_dispatch:
@@ -16,10 +16,13 @@ jobs:
       with:
         python-version: '3.10'
 
-    - name: Install Core Dependencies
+    - name: Install Core Dependencies with Numpy Hotfix
       run: |
         python -m pip install --upgrade pip
-        pip install yfinance gspread pandas numpy google-auth-oauthlib google-api-python-client pytz pandas-ta retrying
+        # 先安裝所有主要的函式庫
+        pip install yfinance gspread pandas google-auth-oauthlib google-api-python-client pytz pandas-ta retrying
+        # 強制安裝一個與 pandas-ta 相容的舊版 numpy
+        pip install numpy==1.23.5
 
     - name: Run The King's Analysis (TW)
       env:
