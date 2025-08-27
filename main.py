@@ -1,9 +1,11 @@
 # -*- coding: utf-8 -*-
-# 【台股遠征計畫 v3.0 - 靈活清單版】
+# 【台股遠征計畫 v4.0 - 0050 動態抓取版】
 # 修正日誌：
-# v3.0: 第一階段基礎建設完成！本版本恢復了系統的靈活性。
-#       移除硬編碼的股票清單，改回讀取外部的 `taiwan_scan_list.json` 檔案。
-#       使用者現在可以透過修改 JSON 檔案，自由定義要分析的股票範圍。
+# v4.0: 系統智能化重大升級！
+#       - 不再讀取本地的 `taiwan_scan_list.json` 檔案。
+#       - 新增 `get_0050_constituents` 函式，在每次執行時，
+#         自動透過 FinMind API 獲取最新的 0050 成分股清單。
+#       - 實現了真正的全自動化，無需再手動維護股票清單。
 
 import os
 import json
@@ -19,17 +21,35 @@ import requests
 
 # --- 核心設定 ---
 TAIPEI_TZ = pytz.timezone('Asia/Taipei')
-FINMIND_API_URL = "https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockInfo"
+FINMIND_API_URL_INFO = "https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockInfo"
+FINMIND_API_URL_0050 = "https://api.finmindtrade.com/api/v4/data?dataset=TaiwanEtfComposition&data_id=0050"
 
-# --- 獲取台股基本資料 (已驗證穩定 ) ---
-@retry(stop_max_attempt_number=3, wait_fixed=3000)
-def get_tw_stock_info():
-    print("步驟 1/4: 正在從 FinMind API 獲取台股基本資料...")
+# --- 新增函式 v4.0：動態獲取 0050 成分股 ---
+@retry(stop_max_attempt_number=3, wait_fixed=3000 )
+def get_0050_constituents():
+    print("步驟 1/5: 正在從 FinMind API 動態獲取最新的 0050 成分股...")
     try:
-        res = requests.get(FINMIND_API_URL, timeout=30)
+        res = requests.get(FINMIND_API_URL_0050, timeout=30)
         res.raise_for_status()
         data = res.json()
-        if data['status'] != 200: raise Exception("FinMind API 回應狀態碼非 200")
+        if data['status'] != 200: raise Exception("FinMind API(0050) 回應狀態碼非 200")
+        df = pd.DataFrame(data['data'])
+        stock_list = df['stock_id'].tolist()
+        print(f"✅ 成功獲取 {len(stock_list)} 支最新的 0050 成分股。")
+        return stock_list
+    except Exception as e:
+        print(f"❌ 錯誤：獲取 0050 成分股時失敗: {e}，將觸發自動重試...")
+        raise
+
+# --- 獲取台股基本資料 (已驗證穩定) ---
+@retry(stop_max_attempt_number=3, wait_fixed=3000)
+def get_tw_stock_info():
+    print("步驟 2/5: 正在從 FinMind API 獲取台股基本資料...")
+    try:
+        res = requests.get(FINMIND_API_URL_INFO, timeout=30)
+        res.raise_for_status()
+        data = res.json()
+        if data['status'] != 200: raise Exception("FinMind API(Info) 回應狀態碼非 200")
         df = pd.DataFrame(data['data'])
         df = df[['stock_id', 'stock_name', 'industry_category']]
         df.rename(columns={'stock_id': '公司代號', 'stock_name': '公司簡稱', 'industry_category': '產業別'}, inplace=True)
@@ -44,7 +64,7 @@ def get_tw_stock_info():
 # --- Google Sheets 連線 (已驗證穩定) ---
 @retry(stop_max_attempt_number=3, wait_fixed=2000)
 def connect_to_google_sheet():
-    print("步驟 3/4: 準備初始化 Google Sheets 客戶端...")
+    print("步驟 4/5: 準備初始化 Google Sheets 客戶端...")
     try:
         creds_json = os.getenv('GOOGLE_SERVICE_ACCOUNT_JSON')
         if not creds_json: raise ValueError("錯誤：環境變數 GOOGLE_SERVICE_ACCOUNT_JSON 未設定。")
@@ -80,27 +100,21 @@ def analyze_stock(ticker, stock_info_map):
     except KeyError: return None
     except Exception as e: return None
 
-# --- 主控流程 (v3.0 靈活清單版) ---
+# --- 主控流程 (v4.0 動態抓取版) ---
 def main():
     print("==============================================")
-    print(f"【台股遠征計畫 v3.0】啟動於 {datetime.now(TAIPEI_TZ).strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"【台股遠征計畫 v4.0】啟動於 {datetime.now(TAIPEI_TZ).strftime('%Y-%m-%d %H:%M:%S')}")
     print("==============================================")
     try:
+        stock_list = get_0050_constituents()
+        if not stock_list:
+            print("❌ 獲取 0050 成分股失敗，任務終止。")
+            return
+
         stock_info_map = get_tw_stock_info()
         if stock_info_map is None: return
 
-        # --- 關鍵修改 v3.0：恢復讀取 JSON 檔案 ---
-        print("\n步驟 2/4: 正在讀取 'taiwan_scan_list.json'...")
-        with open('taiwan_scan_list.json', 'r', encoding='utf-8') as f:
-            stock_list_config = json.load(f)
-        stock_list = stock_list_config.get("stocks", [])
-        # --- 修改結束 ---
-        
-        if not stock_list:
-            print("❌ 錯誤：'taiwan_scan_list.json' 中未找到股票清單或清單為空。")
-            return
-        print(f"✅ 成功讀取 {len(stock_list)} 支待分析股票。")
-        
+        print("\n步驟 3/5: 開始逐一分析成分股...")
         all_reports = []
         for stock_code in stock_list:
             ticker = f"{stock_code}.TW"
@@ -116,7 +130,7 @@ def main():
         spreadsheet = connect_to_google_sheet()
         worksheet_name = f"王者報告_{datetime.now(TAIPEI_TZ).strftime('%Y%m%d')}"
         
-        print(f"步驟 4/4: 準備寫入資料至工作表: '{worksheet_name}'...")
+        print(f"步驟 5/5: 準備寫入資料至工作表: '{worksheet_name}'...")
         try:
             worksheet = spreadsheet.worksheet(worksheet_name)
             worksheet.clear()
@@ -131,7 +145,7 @@ def main():
         
         worksheet.update(data_to_write, range_name='A1')
         print(f"✅ 成功將 {len(df)} 筆數據寫入 '{worksheet_name}'！")
-        print("🎉🎉🎉 任務圓滿成功！🎉🎉🎉")
+        print("🎉🎉🎉 任務圓滿成功！系統已實現全自動化！🎉🎉🎉")
 
     except Exception as e:
         print(f"❌ 主流程發生致命錯誤: {e}")
