@@ -1,0 +1,19 @@
+{
+  "tickers": [
+    "2330.TW",
+    "2317.TW",
+    "0050.TW"
+  ],
+  "period": "6mo",
+  "interval": "1d",
+  "sheet_id": "填入你的 Google Sheet ID",
+  "worksheet": "TA",
+  "rsi_length": 14,
+  "sma_windows": [
+    20,
+    50,
+    200
+  ],
+  "bb_length": 20,
+  "bb_std": 2
+}
