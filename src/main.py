@@ -1,14 +1,10 @@
-import os, json
+import os, json, requests
 from typing import List
 import numpy as np
 import pandas as pd
-import yfinance as yf
 import gspread
 from google.oauth2.service_account import Credentials
 
-# repo 結構：
-#   /config.json   ← 在 repo 根目錄
-#   /src/main.py   ← 這隻程式
 HERE = os.path.dirname(os.path.abspath(__file__))
 CFG_PATH = os.path.join(os.path.dirname(HERE), "config.json")
 
@@ -37,23 +33,51 @@ def bbands(s: pd.Series, length: int = 20, k: float = 2.0):
     width = (upper - lower) / basis
     return basis, upper, lower, width
 
-# ---------- 資料抓取 + 指標計算 ----------
-def fetch_with_indicators(ticker: str, period: str, interval: str, cfg) -> pd.DataFrame:
-    df = yf.download(ticker, period=period, interval=interval, auto_adjust=False, progress=False)
+# ---------- FinMind 抓資料 ----------
+def fetch_tw_stock(ticker: str, start_date: str, end_date: str) -> pd.DataFrame:
+    token = os.environ.get("FINMIND_TOKEN", "")
+    if not token:
+        raise RuntimeError("找不到 FINMIND_TOKEN，請在 GitHub Secrets 設定。")
+
+    url = "https://api.finmindtrade.com/api/v4/data"
+    params = {
+        "dataset": "TaiwanStockPrice",
+        "data_id": ticker,
+        "start_date": start_date,
+        "end_date": end_date
+    }
+    headers = {"Authorization": f"Bearer {token}"}
+    r = requests.get(url, params=params, headers=headers)
+    data = r.json()
+    if data.get("status") != 200:
+        raise RuntimeError(f"FinMind error: {data}")
+    df = pd.DataFrame(data["data"])
     if df.empty:
         return pd.DataFrame()
-    df = df.rename(columns=str.title)  # Open High Low Close Volume
+
+    df.rename(columns={
+        "date": "Date",
+        "open": "Open",
+        "high": "High",
+        "low": "Low",
+        "close": "Close",
+        "Trading_Volume": "Volume"
+    }, inplace=True)
+
+    df["Date"] = pd.to_datetime(df["Date"])
+    df.set_index("Date", inplace=False)
+    return df
+
+# ---------- 加上技術指標 ----------
+def add_indicators(df: pd.DataFrame, ticker: str, cfg) -> pd.DataFrame:
     close = df["Close"].astype(float)
 
-    # RSI
     rsi_len = int(cfg.get("rsi_length", 14))
     df[f"RSI_{rsi_len}"] = rsi_wilder(close, rsi_len)
 
-    # SMAs
     for w in cfg.get("sma_windows", [20, 50, 200]):
         df[f"SMA_{w}"] = sma(close, int(w))
 
-    # BBands
     bb_len = int(cfg.get("bb_length", 20))
     bb_std = float(cfg.get("bb_std", 2))
     basis, upper, lower, width = bbands(close, bb_len, bb_std)
@@ -63,7 +87,7 @@ def fetch_with_indicators(ticker: str, period: str, interval: str, cfg) -> pd.Da
     df[f"BB_{bb_len}_Width"] = width
 
     df.insert(0, "Ticker", ticker)
-    df.reset_index(inplace=True)  # 把 Date 變成欄位
+    df.reset_index(inplace=True)
 
     cols = [
         "Date","Ticker","Open","High","Low","Close","Volume",
@@ -71,14 +95,11 @@ def fetch_with_indicators(ticker: str, period: str, interval: str, cfg) -> pd.Da
     ] + [f"SMA_{w}" for w in cfg.get("sma_windows", [20, 50, 200])] + [
         f"BB_{bb_len}_Basis", f"BB_{bb_len}_Upper", f"BB_{bb_len}_Lower", f"BB_{bb_len}_Width"
     ]
-
     return df.loc[:, [c for c in cols if c in df.columns]]
 
 # ---------- Google Sheets ----------
 def gspread_client():
     sa_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
-    if not sa_path or not os.path.exists(sa_path):
-        raise RuntimeError("找不到 Service Account 憑證，請設定環境變數 GOOGLE_APPLICATION_CREDENTIALS 指向 JSON 檔案。")
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
     creds = Credentials.from_service_account_file(sa_path, scopes=scopes)
     return gspread.authorize(creds)
@@ -91,14 +112,14 @@ def write_dataframe(ws, df: pd.DataFrame):
 def main():
     cfg = load_cfg()
     tickers: List[str] = cfg.get("tickers", [])
-    period = cfg.get("period", "6mo")
-    interval = cfg.get("interval", "1d")
+    start_date = cfg.get("start_date", "2025-01-01")
+    end_date = cfg.get("end_date", "2025-12-31")
 
     frames = []
     for t in tickers:
-        df = fetch_with_indicators(t, period, interval, cfg)
-        if not df.empty:
-            frames.append(df)
+        raw = fetch_tw_stock(t, start_date, end_date)
+        if not raw.empty:
+            frames.append(add_indicators(raw, t, cfg))
 
     if not frames:
         raise RuntimeError("No data fetched for any ticker.")
