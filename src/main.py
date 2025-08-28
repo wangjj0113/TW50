@@ -111,18 +111,33 @@ def write_dataframe(ws, df: pd.DataFrame):
 
 def main():
     cfg = load_cfg()
-    tickers: List[str] = cfg.get("tickers", [])
-    start_date = cfg.get("start_date", "2025-01-01")
-    end_date = cfg.get("end_date", "2025-12-31")
+    # --- START: 診斷用程式碼 ---
+    print("--- 診斷資訊 ---")
+    sheet_id_in_cfg = cfg.get("sheet_id", "未在 config.json 中找到 sheet_id")
+    print(f"讀取到的 Sheet ID: '{sheet_id_in_cfg}'")
+    print("--------------------")
+    # --- END: 診斷用程式碼 ---
+
+    # 股票清單模式
+    mode = cfg.get("ticker_mode", "list")
+    if mode == "auto_etf":
+        etf = cfg.get("etf", "0050")
+        end_date = cfg.get("end_date", pd.Timestamp.today().strftime("%Y-%m-%d"))
+        tickers = get_etf_components(etf, end_date)
+        print(f"{etf} 成分股 {len(tickers)} 檔：", ", ".join(tickers[:10]), "...")
+    else:
+        tickers = cfg.get("tickers", [])
 
     frames = []
     for t in tickers:
-        raw = fetch_tw_stock(t, start_date, end_date)
-        if not raw.empty:
-            frames.append(add_indicators(raw, t, cfg))
+        raw = fetch_tw_stock(t, cfg.get("start_date","2025-01-01"), cfg.get("end_date","2025-12-31"))
+        if raw.empty:
+            print(f"跳過 {t}（沒資料）")
+            continue
+        frames.append(add_indicators(raw, t, cfg))
 
     if not frames:
-        raise RuntimeError("No data fetched for any ticker.")
+        raise RuntimeError("沒有任何股票資料")
 
     out = pd.concat(frames, ignore_index=True)
 
