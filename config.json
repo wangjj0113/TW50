@@ -1,5 +1,5 @@
 {
-  "tickers": ["2330", "2317", "0050"],
+  "tickers": ["2330"],
   "sheet_id": "你的 Google Sheet ID",
   "worksheet": "TW50",
   "rsi_length": 14,
