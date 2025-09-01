@@ -1,6 +1,6 @@
 {
   "tickers": ["2330"],
-  "sheet_id": "你的 Google Sheet ID",
+  "sheet_id": "1bbayENgn4ZuQ5ltKV_7twO1kC3GlYg6vj_DKGw2oHXY",
   "worksheet": "TW50",
   "rsi_length": 14,
   "sma_windows": [20, 50, 200],
