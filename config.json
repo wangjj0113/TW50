@@ -1,5 +1,5 @@
 {
-  "tickers": ["2330", "2317", "0050"],
+  "tickers": ["2330", "2317", "0050","2454","2308","2881","2382","2882"],
   "sheet_id": "1bbayENgn4ZuQ5ltKV_7twO1kC3GlYg6vj_DKGw2oHXY",
   "worksheet": "TW50",
   "rsi_length": 14,
@@ -7,5 +7,6 @@
   "bb_length": 20,
   "bb_std": 2,
   "start_date": "2025-01-01",
-  "end_date": "2025-12-31"
+  "end_date": "2025-12-31",
+  "worksheet_top10": "Top10"  // 可選，若想自訂篩選結果的分頁名稱
 }
