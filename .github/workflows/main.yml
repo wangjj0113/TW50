@@ -2,22 +2,13 @@ name: TA-to-Sheets
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "30 0,10 * * 1-5"  # 週一到週五的 08:30、18:30（台灣 +8）
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    env:
-      TZ: Asia/Taipei
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Show time
-        run: |
-          date
-          echo "TZ=$TZ"
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -25,43 +16,24 @@ jobs:
           python-version: "3.10"
 
       - name: Upgrade pip tooling
-        run: python -m pip install --upgrade "pip<24" "setuptools<70" wheel
+        run: |
+          python -m pip install --upgrade "pip<24" "setuptools<70" wheel
 
       - name: Install dependencies
         run: |
-          pip install --no-cache-dir -r requirements.txt
-          python - <<'PY'
-          import numpy, pandas, requests, gspread
-          print("NumPy", numpy.__version__, "| Pandas", pandas.__version__, "| Requests", requests.__version__)
-          PY
+          pip install --no-cache-dir --upgrade --force-reinstall -r requirements.txt
+          python -c "import numpy, pandas; print('NumPy=', numpy.__version__, 'Pandas=', pandas.__version__)"
 
       - name: Write service account key
         env:
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-        run: echo "$GOOGLE_SERVICE_ACCOUNT_JSON" > $RUNNER_TEMP/sa.json
+        run: |
+          echo "$GOOGLE_SERVICE_ACCOUNT_JSON" > $RUNNER_TEMP/sa.json
 
-      - name: Quick diagnostics
+      - name: Run script
         env:
           GOOGLE_APPLICATION_CREDENTIALS: ${{ runner.temp }}/sa.json
           FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
+          SHEET_ID: ${{ secrets.SHEET_ID }}
         run: |
-          python - <<'PY'
-          import os, json
-          print("[Diag] FINMIND_TOKEN length:", len(os.environ.get("FINMIND_TOKEN","")))
-          with open(os.environ["GOOGLE_APPLICATION_CREDENTIALS"], "r") as f:
-            j=json.load(f)
-          print("[Diag] ServiceAccount:", j.get("client_email"))
-          PY
-
-      - name: Run script (with simple retry)
-        env:
-          GOOGLE_APPLICATION_CREDENTIALS: ${{ runner.temp }}/sa.json
-          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
-        run: |
-          for i in 1 2 3; do
-            echo "== Run attempt $i =="
-            python src/main.py && exit 0
-            echo "Attempt $i failed. Sleep 60s then retry..."
-            sleep 60
-          done
-          echo "All attempts failed"; exit 1
+          python src/main.py
