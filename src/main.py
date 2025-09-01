@@ -6,7 +6,6 @@ import pandas as pd
 import gspread
 from google.oauth2.service_account import Credentials
 
-# 取得 config.json 的路徑（假設 config.json 在專案根目錄）
 HERE = os.path.dirname(os.path.abspath(__file__))
 CFG_PATH = os.path.join(os.path.dirname(HERE), "config.json")
 
@@ -14,7 +13,7 @@ def load_cfg():
     with open(CFG_PATH, "r", encoding="utf-8") as f:
         return json.load(f)
 
-# -------- 技術指標 --------
+# 技術指標
 def sma(series: pd.Series, window: int) -> pd.Series:
     return series.rolling(window=window, min_periods=window).mean()
 
@@ -35,12 +34,12 @@ def bbands(series: pd.Series, length: int = 20, k: float = 2.0):
     width = (upper - lower) / basis
     return basis, upper, lower, width
 
-# -------- FinMind 抓取股價 --------
+# FinMind 抓取股價
 def fetch_tw_stock(ticker: str, start_date: str, end_date: str) -> pd.DataFrame:
-    """呼叫 FinMind API 取得台股歷史資料"""
     token = os.environ.get("FINMIND_TOKEN", "")
     if not token:
         raise RuntimeError("環境變數 FINMIND_TOKEN 未設定，請確認 Secrets 名稱與 workflow 設定。")
+
     url = "https://api.finmindtrade.com/api/v4/data"
     params = {
         "dataset": "TaiwanStockPrice",
@@ -57,7 +56,6 @@ def fetch_tw_stock(ticker: str, start_date: str, end_date: str) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame()
 
-    # 重新命名欄位與格式化
     df.rename(columns={
         "date": "Date",
         "open": "Open",
@@ -69,9 +67,10 @@ def fetch_tw_stock(ticker: str, start_date: str, end_date: str) -> pd.DataFrame:
     df["Date"] = pd.to_datetime(df["Date"])
     return df
 
-# -------- 計算技術指標 --------
+# 計算技術指標
 def add_indicators(df: pd.DataFrame, ticker: str, cfg: dict) -> pd.DataFrame:
     close = df["Close"].astype(float)
+
     rsi_len = int(cfg.get("rsi_length", 14))
     df[f"RSI_{rsi_len}"] = rsi_wilder(close, rsi_len)
 
@@ -90,20 +89,14 @@ def add_indicators(df: pd.DataFrame, ticker: str, cfg: dict) -> pd.DataFrame:
     df.reset_index(inplace=True)
 
     cols = (
-        ["Date", "Ticker", "Open", "High", "Low", "Close", "Volume", f"RSI_{rsi_len}"] +
+        ["Date","Ticker","Open","High","Low","Close","Volume",f"RSI_{rsi_len}"] +
         [f"SMA_{w}" for w in cfg.get("sma_windows", [20, 50, 200])] +
         [f"BB_{bb_len}_Basis", f"BB_{bb_len}_Upper", f"BB_{bb_len}_Lower", f"BB_{bb_len}_Width"]
     )
     return df.loc[:, [c for c in cols if c in df.columns]]
 
-# -------- 選股篩選（長期/短線） --------
+# 篩選前 10 檔（長期/短線條件）
 def filter_candidates(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    範例篩選條件：
-      - 長期持有：收盤價 > 200 日均線 AND 20 日均線 > 50 日均線 AND RSI_14 < 70
-      - 短線機會：RSI_14 < 30 OR 收盤價 < 布林下軌
-    回傳不重覆的前 10 檔股票。
-    """
     long_term  = df[
         (df["Close"] > df["SMA_200"]) &
         (df["SMA_20"] > df["SMA_50"]) &
@@ -116,7 +109,7 @@ def filter_candidates(df: pd.DataFrame) -> pd.DataFrame:
     combined = pd.concat([long_term, short_term]).drop_duplicates(subset=["Ticker"])
     return combined.head(10)
 
-# -------- Google Sheets 相關 --------
+# Google Sheets
 def gspread_client():
     sa_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
@@ -145,7 +138,7 @@ def main():
 
     out = pd.concat(frames, ignore_index=True)
 
-    # 寫入完整資料到指定工作表
+    # 寫入完整資料
     gc = gspread_client()
     sh = gc.open_by_key(cfg["sheet_id"])
     try:
@@ -154,19 +147,17 @@ def main():
         ws_main = sh.add_worksheet(title=cfg["worksheet"], rows="1000", cols="30")
     write_dataframe(ws_main, out)
 
-    # 篩選出前 10 檔候選股
+    # 篩選前 10 檔
     top10 = filter_candidates(out)
 
-    # 寫入 Top10 工作表，名稱可在 config.json 中用 worksheet_top10 自定義，預設為 "Top10"
+    # 寫入 Top10 分頁（可以在 config.json 用 worksheet_top10 自訂名稱）
     top10_name = cfg.get("worksheet_top10", "Top10")
     try:
         ws_top10 = sh.worksheet(top10_name)
     except gspread.WorksheetNotFound:
         ws_top10 = sh.add_worksheet(title=top10_name, rows="100", cols="30")
-
     write_dataframe(ws_top10, top10)
 
-    # 在 log 中列印出選出的股票代號
     print("篩選出的股票代號（不超過 10 檔）：", top10["Ticker"].tolist())
 
 if __name__ == "__main__":
