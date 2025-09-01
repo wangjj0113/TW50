@@ -8,5 +8,5 @@
   "bb_std": 2,
   "start_date": "2025-01-01",
   "end_date": "2025-12-31",
-  "worksheet_top10": "Top10"  // 可選，若想自訂篩選結果的分頁名稱
+  "worksheet_top10": "Top10"  
 }
