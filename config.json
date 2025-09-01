@@ -1,7 +1,7 @@
 {
-  "tickers": ["2330", "2317", "0050"],
+  "tickers": ["2330", "2317", "0050"],  // 這裡可改成您要分析的股票代號（無需加 .TW）
   "sheet_id": "1bbayENgn4ZuQ5ltKV_7twO1kC3GlYg6vj_DKGw2oHXY",
-  "worksheet": "TW50",
+  "worksheet": "TW50",                   // 寫入的工作表名稱，可自行修改
   "rsi_length": 14,
   "sma_windows": [20, 50, 200],
   "bb_length": 20,
