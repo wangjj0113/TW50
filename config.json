@@ -7,7 +7,7 @@
   "sma_windows": [20, 50, 200],
   "bb_length": 20,
   "bb_std": 2,
-  "lookback_days": 30,
-  "start_date": "",
-  "end_date": ""
+  "lookback_days": 60,
+  "start_date": null,
+  "end_date": null
 }
