@@ -1,10 +1,20 @@
 {
-  "tickers": ["2330.TW", "2317.TW", "0050.TW"],
-  "sheet_name": "TW50",
-  "sheet_id": "1bbayENgn4ZuQ51tKV_7twO1kC3GlYJ6v6vj_DKGw2oHXY",
+  "mode": "selector",              // 固定用 selector：自動挑股票
+  "etf": "0050",                   // 從 0050 成分股挑
+
+  "sheet_id": "在這裡貼你的GoogleSheetID",
+  "raw_sheet": "TW50",             // 原始時序（可留著或之後關掉）
+  "candidates_sheet": "Candidates",
+  "focus_sheet": "Focus",
+
   "rsi_length": 14,
   "sma_windows": [20, 50, 200],
   "bb_length": 20,
   "bb_std": 2,
-  "lookback_days": 60
+
+  "top_n": 10,                     // 候選池大小（建議 9~10）
+  "focus_k": 5,                    // 精選數量（建議 3~5）
+
+  "lookback_days": 240,            // 第一次建議 >=220 天，之後可改 90 或 120
+  "write_mode": "append"           // raw_sheet 用 append；Candidates/Focus 每次覆寫
 }
