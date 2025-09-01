@@ -1,91 +1,122 @@
-import os, json, requests, time, sys
+import os
+import json
+import requests
 import numpy as np
 import pandas as pd
 import gspread
 from google.oauth2.service_account import Credentials
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-CFG_PATH = os.path.join(HERE, "..", "config.json")
+CFG_PATH = os.path.join(os.path.dirname(HERE), "config.json")
 
 def load_cfg():
     with open(CFG_PATH, "r", encoding="utf-8") as f:
         return json.load(f)
 
-def rsi(series: pd.Series, length: int = 14) -> pd.Series:
+# -------- 技術指標 --------
+def sma(series: pd.Series, window: int) -> pd.Series:
+    return series.rolling(window=window, min_periods=window).mean()
+
+def rsi_wilder(series: pd.Series, length: int = 14) -> pd.Series:
     delta = series.diff()
-    up = delta.clip(lower=0)
-    down = -delta.clip(upper=0)
-    ma_up = up.rolling(length, min_periods=length).mean()
-    ma_down = down.rolling(length, min_periods=length).mean()
-    rs = ma_up / ma_down.replace(0, np.nan)
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1/length, adjust=False, min_periods=length).mean()
+    avg_loss = loss.ewm(alpha=1/length, adjust=False, min_periods=length).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
     return 100 - (100 / (1 + rs))
 
-def sma(series: pd.Series, length: int = 20) -> pd.Series:
-    return series.rolling(length, min_periods=length).mean()
-
-def bbands(series: pd.Series, length: int = 20, std: float = 2.0):
-    basis = series.rolling(length).mean()
-    dev = series.rolling(length).std(ddof=0)
-    upper = basis + std * dev
-    lower = basis - std * dev
+def bbands(series: pd.Series, length: int = 20, k: float = 2.0):
+    basis = series.rolling(length, min_periods=length).mean()
+    dev   = series.rolling(length, min_periods=length).std(ddof=0)
+    upper = basis + k * dev
+    lower = basis - k * dev
     width = (upper - lower) / basis
     return basis, upper, lower, width
 
-def finmind_get(dataset: str, params: dict, retries: int = 3, pause: float = 1.0) -> pd.DataFrame:
-    token = os.environ.get("FINMIND_TOKEN", "")
-    headers = {"Authorization": f"Bearer {token}"} if token else {}
-    url = "https://api.finmindtrade.com/api/v4/data"
-    for i in range(1, retries + 1):
-        try:
-            r = requests.get(url, params={"dataset": dataset, **params}, headers=headers, timeout=60)
-            if r.status_code in (429, 503):  # 節流/暫時不可用
-                print(f"[FinMind] {r.status_code}，第 {i}/{retries} 次重試…")
-                time.sleep(pause * i)
-                continue
-            r.raise_for_status()
-            j = r.json()
-            if j.get("status") != 200:
-                print(f"[FinMind] 回傳非 200 狀態：{j}")
-                time.sleep(pause * i)
-                continue
-            return pd.DataFrame(j.get("data", []))
-        except Exception as e:
-            print(f"[FinMind] 例外：{e}，第 {i}/{retries} 次重試…")
-            time.sleep(pause * i)
-    return pd.DataFrame()
-
+# -------- FinMind 抓取股價 --------
 def fetch_tw_stock(ticker: str, start_date: str, end_date: str) -> pd.DataFrame:
-    df = finmind_get("TaiwanStockPrice", {
-        "data_id": ticker, "start_date": start_date, "end_date": end_date
-    })
+    token = os.environ.get("FINMIND_TOKEN", "")
+    if not token:
+        raise RuntimeError("環境變數 FINMIND_TOKEN 未設定。請確認 Secret 名稱及工作流程設定。")
+
+    url = "https://api.finmindtrade.com/api/v4/data"
+    params = {
+        "dataset": "TaiwanStockPrice",
+        "data_id": ticker,
+        "start_date": start_date,
+        "end_date": end_date
+    }
+    headers = {"Authorization": f"Bearer {token}"}
+    resp = requests.get(url, params=params, headers=headers, timeout=30)
+    data = resp.json()
+    if data.get("status") != 200:
+        raise RuntimeError(f"FinMind API 回傳錯誤: {data}")
+    df = pd.DataFrame(data["data"])
     if df.empty:
-        return df
+        return pd.DataFrame()
+
     df.rename(columns={
-        "date":"Date","stock_id":"Ticker","open":"Open","max":"High","min":"Low",
-        "close":"Close","Trading_Volume":"Volume"
+        "date": "Date",
+        "open": "Open",
+        "high": "High",
+        "low": "Low",
+        "close": "Close",
+        "Trading_Volume": "Volume"
     }, inplace=True)
     df["Date"] = pd.to_datetime(df["Date"])
     return df
 
-def add_indicators(df: pd.DataFrame, cfg) -> pd.DataFrame:
-    if df.empty: return df
+# -------- 計算技術指標 --------
+def add_indicators(df: pd.DataFrame, ticker: str, cfg: dict) -> pd.DataFrame:
     close = df["Close"].astype(float)
     rsi_len = int(cfg.get("rsi_length", 14))
-    df[f"RSI({rsi_len})"] = rsi(close, rsi_len)
-    for w in cfg.get("sma_windows", [20, 50, 200]):
-        df[f"SMA({int(w)})"] = sma(close, int(w))
-    bb_len = int(cfg.get("bb_length", 20)); bb_std = float(cfg.get("bb_std", 2))
-    basis, upper, lower, width = bbands(close, bb_len, bb_std)
-    df[f"BB_{bb_len}_Basis"] = basis
-    df[f"BB_{bb_len}_Upper"] = upper
-    df[f"BB_{bb_len}_Lower"] = lower
-    df[f"BB_{bb_len}_Width"] = width
-    return df
+    df[f"RSI_{rsi_len}"] = rsi_wilder(close, rsi_len)
 
+    for w in cfg.get("sma_windows", [20, 50, 200]):
+        df[f"SMA_{w}"] = sma(close, int(w))
+
+    bb_len = int(cfg.get("bb_length", 20))
+    bb_std = float(cfg.get("bb_std", 2))
+    basis, upper, lower, width = bbands(close, bb_len, bb_std)
+    df[f"BB_{bb_len}_Basis"]  = basis
+    df[f"BB_{bb_len}_Upper"]  = upper
+    df[f"BB_{bb_len}_Lower"]  = lower
+    df[f"BB_{bb_len}_Width"]  = width
+
+    df.insert(0, "Ticker", ticker)
+    df.reset_index(inplace=True)
+
+    cols = (
+        ["Date", "Ticker", "Open", "High", "Low", "Close", "Volume", f"RSI_{rsi_len}"] +
+        [f"SMA_{w}" for w in cfg.get("sma_windows", [20, 50, 200])] +
+        [f"BB_{bb_len}_Basis", f"BB_{bb_len}_Upper", f"BB_{bb_len}_Lower", f"BB_{bb_len}_Width"]
+    )
+    return df.loc[:, [c for c in cols if c in df.columns]]
+
+# -------- 選股篩選（長期/短線） --------
+def filter_candidates(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    範例篩選條件：
+      - 長期持有：收盤價 > 200 日均線 AND 20 日均線 > 50 日均線 AND RSI_14 < 70
+      - 短線機會：RSI_14 < 30 OR 收盤價 < 布林下軌
+    回傳不重覆的前 10 檔股票。
+    """
+    long_term  = df[
+        (df["Close"] > df["SMA_200"]) &
+        (df["SMA_20"] > df["SMA_50"]) &
+        (df["RSI_14"] < 70)
+    ]
+    short_term = df[
+        (df["RSI_14"] < 30) |
+        (df["Close"] < df["BB_20_Lower"])
+    ]
+    combined = pd.concat([long_term, short_term]).drop_duplicates(subset=["Ticker"])
+    return combined.head(10)
+
+# -------- Google Sheets 相關 --------
 def gspread_client():
     sa_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
-    if not sa_path or not os.path.exists(sa_path):
-        raise RuntimeError("GOOGLE_APPLICATION_CREDENTIALS 未設或找不到檔案")
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
     creds = Credentials.from_service_account_file(sa_path, scopes=scopes)
     return gspread.authorize(creds)
@@ -97,45 +128,33 @@ def write_dataframe(ws, df: pd.DataFrame):
 
 def main():
     cfg = load_cfg()
-
-    # 時間區間（僅 lookback_days，自動推算）
-    end_date = pd.Timestamp.now(tz="Asia/Taipei").strftime("%Y-%m-%d")
-    lookback_days = int(cfg.get("lookback_days", 90))
-    start_date = (pd.to_datetime(end_date) - pd.Timedelta(days=lookback_days)).strftime("%Y-%m-%d")
-
     tickers = cfg.get("tickers", [])
-    print(f"[Diag] 時區=Asia/Taipei | 期間 {start_date} ~ {end_date}")
-    print(f"[Diag] Tickers={len(tickers)}：{', '.join(tickers[:8])}{' ...' if len(tickers)>8 else ''}")
+    start_date = cfg.get("start_date")
+    end_date   = cfg.get("end_date")
 
     frames = []
-    for i, t in enumerate(tickers, 1):
-        print(f"[{i}/{len(tickers)}] 抓取 {t} …")
-        raw = fetch_tw_stock(t, start_date, end_date)
-        if raw.empty:
-            print(f"  -> 無資料（可能是假日/更新未到/節流），跳過 {t}")
-            continue
-        frames.append(add_indicators(raw, cfg))
-        time.sleep(0.8)  # 節流更保守
+    for ticker in tickers:
+        raw = fetch_tw_stock(ticker, start_date, end_date)
+        if not raw.empty:
+            frames.append(add_indicators(raw, ticker, cfg))
 
     if not frames:
-        print("[Diag] 本次沒有任何有效資料可寫入（不視為失敗）。")
-        # 給一個空訊息並正常退出，避免紅叉
-        sys.exit(0)
+        raise RuntimeError("沒有任何股票資料被成功抓取，請檢查代號或日期。")
 
     out = pd.concat(frames, ignore_index=True)
-    if "Date" in out.columns:
-        out["Date"] = pd.to_datetime(out["Date"]).dt.strftime("%Y-%m-%d")
 
-    print(f"[Diag] 合併完成 Rows={len(out)} Cols={len(out.columns)}")
-
+    # 寫入全部資料到原工作表
     gc = gspread_client()
     sh = gc.open_by_key(cfg["sheet_id"])
     try:
-        ws = sh.worksheet(cfg["sheet_name"])
+        ws = sh.worksheet(cfg["worksheet"])
     except gspread.WorksheetNotFound:
-        ws = sh.add_worksheet(title=cfg["sheet_name"], rows="200", cols="26")
+        ws = sh.add_worksheet(title=cfg["worksheet"], rows="1000", cols="30")
     write_dataframe(ws, out)
-    print(f"✅ 寫入完成 Rows={len(out)} Cols={len(out.columns)}")
+
+    # 篩選出前 10 檔候選股，列印在日誌中
+    top10 = filter_candidates(out)
+    print("篩選出的股票代號（不超過 10 檔）：", top10["Ticker"].tolist())
 
 if __name__ == "__main__":
     main()
