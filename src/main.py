@@ -6,6 +6,7 @@ import pandas as pd
 import gspread
 from google.oauth2.service_account import Credentials
 
+# 取得 config.json 的路徑（假設 config.json 在專案根目錄）
 HERE = os.path.dirname(os.path.abspath(__file__))
 CFG_PATH = os.path.join(os.path.dirname(HERE), "config.json")
 
@@ -36,10 +37,10 @@ def bbands(series: pd.Series, length: int = 20, k: float = 2.0):
 
 # -------- FinMind 抓取股價 --------
 def fetch_tw_stock(ticker: str, start_date: str, end_date: str) -> pd.DataFrame:
+    """呼叫 FinMind API 取得台股歷史資料"""
     token = os.environ.get("FINMIND_TOKEN", "")
     if not token:
-        raise RuntimeError("環境變數 FINMIND_TOKEN 未設定。請確認 Secret 名稱及工作流程設定。")
-
+        raise RuntimeError("環境變數 FINMIND_TOKEN 未設定，請確認 Secrets 名稱與 workflow 設定。")
     url = "https://api.finmindtrade.com/api/v4/data"
     params = {
         "dataset": "TaiwanStockPrice",
@@ -56,6 +57,7 @@ def fetch_tw_stock(ticker: str, start_date: str, end_date: str) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame()
 
+    # 重新命名欄位與格式化
     df.rename(columns={
         "date": "Date",
         "open": "Open",
@@ -128,7 +130,7 @@ def write_dataframe(ws, df: pd.DataFrame):
 
 def main():
     cfg = load_cfg()
-    tickers = cfg.get("tickers", [])
+    tickers    = cfg.get("tickers", [])
     start_date = cfg.get("start_date")
     end_date   = cfg.get("end_date")
 
@@ -143,17 +145,28 @@ def main():
 
     out = pd.concat(frames, ignore_index=True)
 
-    # 寫入全部資料到原工作表
+    # 寫入完整資料到指定工作表
     gc = gspread_client()
     sh = gc.open_by_key(cfg["sheet_id"])
     try:
-        ws = sh.worksheet(cfg["worksheet"])
+        ws_main = sh.worksheet(cfg["worksheet"])
     except gspread.WorksheetNotFound:
-        ws = sh.add_worksheet(title=cfg["worksheet"], rows="1000", cols="30")
-    write_dataframe(ws, out)
+        ws_main = sh.add_worksheet(title=cfg["worksheet"], rows="1000", cols="30")
+    write_dataframe(ws_main, out)
 
-    # 篩選出前 10 檔候選股，列印在日誌中
+    # 篩選出前 10 檔候選股
     top10 = filter_candidates(out)
+
+    # 寫入 Top10 工作表，名稱可在 config.json 中用 worksheet_top10 自定義，預設為 "Top10"
+    top10_name = cfg.get("worksheet_top10", "Top10")
+    try:
+        ws_top10 = sh.worksheet(top10_name)
+    except gspread.WorksheetNotFound:
+        ws_top10 = sh.add_worksheet(title=top10_name, rows="100", cols="30")
+
+    write_dataframe(ws_top10, top10)
+
+    # 在 log 中列印出選出的股票代號
     print("篩選出的股票代號（不超過 10 檔）：", top10["Ticker"].tolist())
 
 if __name__ == "__main__":
