@@ -127,49 +127,40 @@ def write_dataframe(ws, df: pd.DataFrame):
 def main():
     cfg = load_cfg()
 
-    # 期間：只抓最近 N 天（避免資料太多）
-    end_date = cfg.get("end_date", pd.Timestamp.today().strftime("%Y-%m-%d"))
-    lookback_days = int(cfg.get("lookback_days", 90))
-    start_date = cfg.get("start_date")
-    if not start_date:
-        start_date = (pd.to_datetime(end_date) - pd.Timedelta(days=lookback_days)).strftime("%Y-%m-%d")
+    # 期間：抓最近 N 天（避免一次抓太多資料）
+    end_date = cfg.get("end_date") or pd.Timestamp.today().strftime("%Y-%m-%d")
+    lookback_days = int(cfg.get("lookback_days") or 90)
+    start_date = cfg.get("start_date") or (
+        pd.to_datetime(end_date) - pd.Timedelta(days=lookback_days)
+    ).strftime("%Y-%m-%d")
 
-    # 股票清單
-    if cfg.get("ticker_mode", "list") == "auto_etf":
-        tickers = get_etf_components(cfg.get("etf", "0050"), end_date)
-        print(f"{cfg.get('etf','0050')} 成分股 {len(tickers)} 檔，抓取區間 {start_date} ~ {end_date}")
-    else:
+    # 判斷要用固定清單還是自動成分股
+    if cfg.get("ticker_mode") == "list":
         tickers = cfg.get("tickers", [])
-        print(f"手動清單 {len(tickers)} 檔，抓取區間 {start_date} ~ {end_date}")
+    else:
+        tickers = get_components(cfg.get("etf", "0050"), end_date)
+
+    print(f"共 {len(tickers)} 檔股票，抓取區間 {start_date} ~ {end_date}")
 
     frames = []
     for i, t in enumerate(tickers, 1):
-        print(f"[{i}/{len(tickers)}] 抓 {t} ...")
+        print(f"[{i}/{len(tickers)}] 處理 {t} ...")
         raw = fetch_tw_stock(t, start_date, end_date)
         if raw.empty:
-            print(f"  -> 無資料，跳過")
+            print(f"⚠️ {t} 沒有資料，略過")
             continue
         frames.append(add_indicators(raw, t, cfg))
-        time.sleep(0.6)  # 節流，避免被限流
+        time.sleep(0.6)  # API 頻率保護
 
     if not frames:
-        raise RuntimeError("沒有任何股票資料")
+        raise RuntimeError("沒有任何股票資料可寫入！")
 
     out = pd.concat(frames, ignore_index=True)
 
-    # 轉字串避免 JSON 序列化錯誤
-    if "Date" in out.columns:
-        out["Date"] = pd.to_datetime(out["Date"]).dt.strftime("%Y-%m-%d")
-
-    gc = gspread_client()
-    sh = gc.open_by_key(cfg["sheet_id"])
-    try:
-        ws = sh.worksheet(cfg["worksheet"])
-    except gspread.WorksheetNotFound:
-        ws = sh.add_worksheet(title=cfg["worksheet"], rows="200", cols="26")
-
+    ws = gspread_client().open_by_key(cfg["sheet_id"]).worksheet(cfg["worksheet"])
     write_dataframe(ws, out)
-    print(f"Done. Rows: {len(out)} | Cols: {len(out.columns)}")
+    print(f"✅ Done! Rows: {len(out)}, Cols: {len(out.columns)}")
+
 
 if __name__ == "__main__":
     main()
