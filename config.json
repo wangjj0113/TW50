@@ -1,11 +1,10 @@
 {
-  "tickers": ["2330"],
-  "ticker_mode": "list",
-  "sheet_id": "1bbayENgn4ZuQ51tKV_7twO1kC3GlYJg6Vyj_DKGw2oHXY",
-  "worksheet": "TW50",
+  "tickers": ["2330.TW", "2317.TW", "0050.TW"],
+  "sheet_name": "TW50",
+  "sheet_id": "1bbayENgn4ZuQ51tKV_7twO1kC3GlYJ6v6vj_DKGw2oHXY",
   "rsi_length": 14,
   "sma_windows": [20, 50, 200],
   "bb_length": 20,
   "bb_std": 2,
-  "lookback_days": 60,
-  }
+  "lookback_days": 60
+}
