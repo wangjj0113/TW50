@@ -10,7 +10,7 @@
   "bb_length": 20,
   "bb_std": 2,
 
-  "lookback_days": 30,          // ⬅ 抓最近 90 天；想更少改成 60 或 45
+  "lookback_days": 45,          // ⬅ 抓最近 90 天；想更少改成 60 或 45
   "start_date": "",             // 也可以留空，會用 lookback_days 算
   "end_date": ""                // 留空=今天；要固定到某天就填 YYYY-MM-DD
 }
