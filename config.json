@@ -1,11 +1,16 @@
 {
-  "tickers": ["2330"],
+  "ticker_mode": "auto_etf",
+  "etf": "0050",
+
   "sheet_id": "1bbayENgn4ZuQ5ltKV_7twO1kC3GlYg6vj_DKGw2oHXY",
   "worksheet": "TW50",
+
   "rsi_length": 14,
   "sma_windows": [20, 50, 200],
   "bb_length": 20,
   "bb_std": 2,
-  "start_date": "2025-01-01",
-  "end_date": "2025-12-31"
+
+  "lookback_days": 30,          // ⬅ 抓最近 90 天；想更少改成 60 或 45
+  "start_date": "",             // 也可以留空，會用 lookback_days 算
+  "end_date": ""                // 留空=今天；要固定到某天就填 YYYY-MM-DD
 }
