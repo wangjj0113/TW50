@@ -8,6 +8,4 @@
   "bb_length": 20,
   "bb_std": 2,
   "lookback_days": 60,
-  "start_date": null,
-  "end_date": null
-}
+  }
