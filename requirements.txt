@@ -1,6 +1,6 @@
-pandas==2.2.2
-numpy==1.26.4
-requests==2.32.3
-gspread==6.1.4
-google-auth==2.33.0
-google-auth-oauthlib==1.2.1
+pandas
+numpy
+requests
+gspread
+google-auth
+tzdata
