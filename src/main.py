@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 import gspread
 from google.oauth2.service_account import Credentials
+from datetime import datetime  # <== 新增導入時間模組
 
 # 讀取 config.json
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -89,7 +90,7 @@ def add_indicators(df: pd.DataFrame, ticker: str, cfg: dict) -> pd.DataFrame:
     df.insert(0, "Ticker", ticker)
     df.reset_index(inplace=True)
 
-    # 將日期轉字串，避免 JSON 序列化錯誤
+    # 日期轉字串，避免 JSON 序列化錯誤
     if "Date" in df.columns and pd.api.types.is_datetime64_any_dtype(df["Date"]):
         df["Date"] = df["Date"].dt.strftime("%Y-%m-%d")
 
@@ -126,12 +127,18 @@ def gspread_client():
     return gspread.authorize(creds)
 
 def write_dataframe(ws, df: pd.DataFrame):
-    data = df.copy()
-    for col in data.select_dtypes(include=["datetime64[ns]", "datetime64"]):
-        data[col] = data[col].astype(str)
-    values = [data.columns.tolist()] + data.astype(object).where(pd.notna(data), "").values.tolist()
+    """
+    清空整個工作表後，於 A1 寫入更新時間，
+    然後從 A2 開始寫入資料（欄名 + 列資料）。
+    """
     ws.clear()
-    ws.update(values, value_input_option="RAW")
+    # 寫入最後更新時間到 A1
+    update_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    ws.update("A1", f"Last Update: {update_time}")
+    # 準備欄名與資料
+    values = [df.columns.tolist()] + df.astype(object).where(pd.notna(df), "").values.tolist()
+    # 從 A2 開始寫入全部數據
+    ws.update("A2", values)
 
 # ===== 主流程 =====
 def main():
@@ -141,7 +148,6 @@ def main():
 
     tickers = cfg.get("tickers", [])
     if not tickers:
-        # 若 tickers 為空，請務必手動維護 tickers
         raise RuntimeError("tickers 為空，而 etf_id 目前無法自動取得成分股，請在 config.json 填入股票代號列表。")
 
     frames = []
