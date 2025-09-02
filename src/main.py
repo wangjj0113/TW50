@@ -49,25 +49,6 @@ def finmind_get(dataset: str, params: dict) -> pd.DataFrame:
         raise RuntimeError(f"FinMind API 回傳錯誤: {data}")
     return pd.DataFrame(data["data"])
 
-def get_etf_components(etf_id: str, start_date: str, end_date: str) -> list:
-    """
-    取得 ETF 成分股（取區間內最新一日的成分股，過濾權重>0）
-    """
-    df = finmind_get("TaiwanETFComponent", {
-        "data_id": etf_id,
-        "start_date": start_date,
-        "end_date": end_date
-    })
-    if df.empty:
-        return []
-    df["date"] = pd.to_datetime(df["date"])
-    last_date = df["date"].max()
-    latest = df[df["date"] == last_date]
-    if "weight" in latest.columns:
-        latest = latest[latest["weight"].astype(float) > 0]
-    ids = latest["stock_id"].dropna().astype(str).unique().tolist()
-    return ids
-
 def fetch_tw_stock(ticker: str, start_date: str, end_date: str) -> pd.DataFrame:
     df = finmind_get("TaiwanStockPrice", {
         "data_id": ticker,
@@ -108,7 +89,7 @@ def add_indicators(df: pd.DataFrame, ticker: str, cfg: dict) -> pd.DataFrame:
     df.insert(0, "Ticker", ticker)
     df.reset_index(inplace=True)
 
-    # 將日期轉成字串，避免 JSON 序列化錯誤
+    # 將日期轉字串，避免 JSON 序列化錯誤
     if "Date" in df.columns and pd.api.types.is_datetime64_any_dtype(df["Date"]):
         df["Date"] = df["Date"].dt.strftime("%Y-%m-%d")
 
@@ -160,14 +141,8 @@ def main():
 
     tickers = cfg.get("tickers", [])
     if not tickers:
-        etf_id = cfg.get("etf_id")
-        if not etf_id:
-            raise RuntimeError("請在 config.json 提供 tickers 或 etf_id。")
-        print(f"自動抓取 ETF {etf_id} 成分股…")
-        tickers = get_etf_components(etf_id, start_date, end_date)
-        if not tickers:
-            raise RuntimeError(f"抓不到 ETF {etf_id} 成分股，請確認日期範圍或 Token。")
-        print(f"抓到 {len(tickers)} 檔：{tickers}")
+        # 若 tickers 為空，請務必手動維護 tickers
+        raise RuntimeError("tickers 為空，而 etf_id 目前無法自動取得成分股，請在 config.json 填入股票代號列表。")
 
     frames = []
     for t in tickers:
