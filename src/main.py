@@ -149,10 +149,12 @@ def write_to_sheet(df, cfg, page_key):
     ws.update_acell("A1", f"最後更新（台北）：{_tw_now()}")
 
 # ----------------------
-# main
+# main（強制 dev，保證只寫 _test 分頁）
 # ----------------------
 def main():
     cfg = _load_cfg()
+    cfg["mode"] = "dev"   # ← 強制 dev，這個版本永遠只寫 _test
+
     tickers = _with_tw_suffix(TICKERS)
 
     # 1) 抓價
@@ -163,16 +165,14 @@ def main():
     # 2) 指標與中文欄位
     base = add_indicators(base, cfg)
 
-    # 3) 寫 TW50 / TW50_test
+    # 3) 寫 TW50_test
     write_to_sheet(base, cfg, "tw50")
 
-    # 4) Top10：只在 dev 寫入
-    if cfg["mode"] == "dev":
-        top10 = build_top10(base)
-        # 顯示目標表名（方便排查）
-        top10_name = _pick_sheet(cfg, "top10")
-        print("MODE =", cfg["mode"], "| Top10 target =", top10_name)
-        write_to_sheet(top10, cfg, "top10")
+    # 4) 寫 Top10_test
+    top10 = build_top10(base)
+    top10_name = _pick_sheet(cfg, "top10")
+    print("MODE =", cfg["mode"], "| Top10 target =", top10_name)
+    write_to_sheet(top10, cfg, "top10")
 
 if __name__ == "__main__":
     main()
