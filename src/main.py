@@ -52,7 +52,7 @@ def fetch_prices(tickers, cfg):
     return pd.concat(data, ignore_index=True) if data else pd.DataFrame()
 
 def add_indicators(df, cfg):
-    if df.empty: 
+    if df.empty:
         return df
     df = df.sort_values(["代號","日期"]).copy()
 
@@ -86,7 +86,7 @@ def add_indicators(df, cfg):
         g["長線趨勢"] = ["上升" if a>b else "下降" if a<b else "中立"
                       for a,b in zip(g["SMA50"], g["SMA200"])]
 
-        # 建議（簡版：test 驗證用；之後可換強化版）
+        # 建議（簡版：test 驗證用）
         def _short_suggest(r):
             if pd.isna(r): return "觀望"
             if r < 30: return "買入"
@@ -100,19 +100,26 @@ def add_indicators(df, cfg):
     return df.groupby("代號", group_keys=False).apply(_group)
 
 # ----------------------
-# Top10 建表：短線=買入 → RSI 由低到高 → 取前10
+# Top10：短線=買入 → RSI 由低到高 → 取前10（無買入時保底取 RSI 最低10 檔）
 # ----------------------
 def build_top10(df):
     if df.empty:
         return pd.DataFrame()
     latest_date = df["日期"].max()
     latest = df[df["日期"] == latest_date].copy()
-    pick = latest[latest["短線建議"] == "買入"].sort_values("RSI14", ascending=True).head(10)
-    cols = ["日期","代號","收盤","RSI14","SMA20","SMA50","SMA200","短線趨勢","長線趨勢","短線建議","長線建議"]
+
+    buy = latest[latest["短線建議"] == "買入"].copy()
+    if buy.empty:
+        pick = latest.sort_values("RSI14", ascending=True).head(10)
+    else:
+        pick = buy.sort_values("RSI14", ascending=True).head(10)
+
+    cols = ["日期","代號","收盤","RSI14","SMA20","SMA50","SMA200",
+            "短線趨勢","長線趨勢","短線建議","長線建議"]
     return pick.reindex(columns=cols)
 
 # ----------------------
-# Google Sheets 輸出
+# Google Sheets 輸出（先清→寫資料→最後補 A1 時間戳）
 # ----------------------
 def write_to_sheet(df, cfg, page_key):
     import gspread
@@ -125,28 +132,21 @@ def write_to_sheet(df, cfg, page_key):
     gc = gspread.authorize(creds)
     sh = gc.open_by_key(cfg["sheet_id"])
 
-    sheet_name = _pick_sheet(cfg, page_key)  # 防呆已在函式內
+    sheet_name = _pick_sheet(cfg, page_key)
     ws = sh.worksheet(sheet_name)
 
-    # A1 寫時間戳，其餘整表覆蓋
-    ws.update_acell("A1", f"最後更新（台北）：{_tw_now()}")
-    ws.clear()  # 清空（保留 A1 之外會被清掉，但我們馬上從 A2 開始寫）
+    # 先整張清空（避免殘留舊資料）
+    ws.clear()
 
     if df.empty:
         ws.update("A2", [["無資料"]])
-        return
+    else:
+        out = df.copy()
+        values = [out.columns.tolist()] + out.fillna("").values.tolist()
+        ws.update("A2", values, value_input_option="RAW")
 
-    # 欄位輸出順序
-    if page_key == "tw50":
-        cols = ["日期","代號","開盤","最高","最低","收盤","成交量",
-                "SMA20","SMA50","SMA200","RSI14","BB_Mid","BB_Up","BB_Low","BB_Width",
-                "短線趨勢","長線趨勢","短線建議","長線建議"]
-    else:  # top10
-        cols = ["日期","代號","收盤","RSI14","SMA20","SMA50","SMA200","短線趨勢","長線趨勢","短線建議","長線建議"]
-
-    out = df.reindex(columns=cols).copy()
-    values = [out.columns.tolist()] + out.fillna("").values.tolist()
-    ws.update("A2", values, value_input_option="RAW")
+    # 最後再寫 A1 時間戳，避免被 clear 蓋掉
+    ws.update_acell("A1", f"最後更新（台北）：{_tw_now()}")
 
 # ----------------------
 # main
@@ -166,9 +166,12 @@ def main():
     # 3) 寫 TW50 / TW50_test
     write_to_sheet(base, cfg, "tw50")
 
-    # 4) Top10：目前只在 dev（test 分支）寫入，避免誤傷正式
+    # 4) Top10：只在 dev 寫入
     if cfg["mode"] == "dev":
         top10 = build_top10(base)
+        # 顯示目標表名（方便排查）
+        top10_name = _pick_sheet(cfg, "top10")
+        print("MODE =", cfg["mode"], "| Top10 target =", top10_name)
         write_to_sheet(top10, cfg, "top10")
 
 if __name__ == "__main__":
