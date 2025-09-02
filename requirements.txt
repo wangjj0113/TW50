@@ -1,6 +1,6 @@
-pandas
-numpy
-requests
-gspread
-google-auth
-tzdata
+gspread==5.9.0
+google-auth==2.22.0
+pandas==1.5.3
+numpy==1.23.5
+pandas-ta==0.3.14b0
+requests==2.31.0
