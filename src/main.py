@@ -24,7 +24,6 @@ HEADERS = {"Authorization": f"Bearer {cfg.get('finmind_token','')}"}
 
 
 def fm_get(dataset: str, **params) -> dict:
-    """Call FinMind v4 and return json dict."""
     p = {"dataset": dataset}
     p.update(params)
     r = requests.get(FINMIND_URL, params=p, headers=HEADERS, timeout=30)
@@ -36,7 +35,6 @@ _name_cache: dict[str, str] = {}
 
 
 def fetch_stock_name(ticker: str) -> str:
-    """Fetch TW stock name (cached)."""
     if ticker in _name_cache:
         return _name_cache[ticker]
     try:
@@ -82,7 +80,13 @@ def calc_rsi(close: pd.Series, length: int = 14) -> pd.Series:
     return rsi
 
 
-def calc_indicators(df: pd.DataFrame, rsi_len: int, sma_windows: list[int], bb_len: int, bb_std: float) -> pd.DataFrame:
+def calc_indicators(
+    df: pd.DataFrame,
+    rsi_len: int,
+    sma_windows: list[int],
+    bb_len: int,
+    bb_std: float,
+) -> pd.DataFrame:
     if df.empty:
         return df.copy()
 
@@ -96,7 +100,7 @@ def calc_indicators(df: pd.DataFrame, rsi_len: int, sma_windows: list[int], bb_l
     for w in sma_windows:
         out[f"SMA_{w}"] = close.rolling(w).mean()
 
-    # Bollinger(20, 2) 可由 config 調
+    # Bollinger
     basis = close.rolling(bb_len).mean()
     stdev = close.rolling(bb_len).std()
     upper = basis + bb_std * stdev
@@ -106,13 +110,82 @@ def calc_indicators(df: pd.DataFrame, rsi_len: int, sma_windows: list[int], bb_l
     out["BB_20_Lower"] = lower
     out["BB_20_Width"] = upper - lower
 
+    # ---- 進階欄位（把你表格公式邏輯寫進來）----
+    # 長期趨勢：看 Close vs SMA_200（±0.5% 視為 Neutral）
+    tol = 0.005
+    sma200 = out.get("SMA_200")
+    if sma200 is not None:
+        diff200 = (close - sma200) / sma200
+        cond_up = diff200 > tol
+        cond_down = diff200 < -tol
+        out["LongTrend"] = pd.Series("Neutral", index=out.index)
+        out.loc[cond_up, "LongTrend"] = "Uptrend"
+        out.loc[cond_down, "LongTrend"] = "Downtrend"
+    else:
+        out["LongTrend"] = "Neutral"
+
+    # 短期趨勢：SMA_20 vs SMA_50（±0.5% 視為 Neutral）
+    sma20 = out.get("SMA_20")
+    sma50 = out.get("SMA_50")
+    if sma20 is not None and sma50 is not None:
+        diff_short = (sma20 - sma50) / sma50
+        cond_up = diff_short > tol
+        cond_down = diff_short < -tol
+        out["ShortTrend"] = pd.Series("Neutral", index=out.index)
+        out.loc[cond_up, "ShortTrend"] = "Uptrend"
+        out.loc[cond_down, "ShortTrend"] = "Downtrend"
+    else:
+        out["ShortTrend"] = "Neutral"
+
+    # 進場/出場區間
+    # 進場：BB_20_Lower ~ SMA_50
+    out["EntryZone"] = False
+    if "BB_20_Lower" in out and "SMA_50" in out:
+        out["EntryZone"] = (close >= out["BB_20_Lower"]) & (close <= out["SMA_50"])
+
+    # 出場：SMA_200 ~ BB_20_Upper
+    out["ExitZone"] = False
+    if "BB_20_Upper" in out and "SMA_200" in out:
+        out["ExitZone"] = (close >= out["SMA_200"]) & (close <= out["BB_20_Upper"])
+
+    # 短線訊號：RSI/BB 上下軌
+    rsi_col = f"RSI_{rsi_len}"
+    out["ShortSignal"] = "Hold"
+    if rsi_col in out:
+        overbought = (out[rsi_col] > 70) | (close > out["BB_20_Upper"])
+        oversold = (out[rsi_col] < 30) | (close < out["BB_20_Lower"])
+        out.loc[oversold, "ShortSignal"] = "Buy"
+        out.loc[overbought, "ShortSignal"] = "Sell"
+
+    # 把訊號轉成人話（你手機截圖那種）
+    out["短線建議"] = out["ShortSignal"].map(
+        {"Buy": "短線：買入", "Sell": "短線：賣出", "Hold": "短線：觀望"}
+    )
+
+    # 長線建議：綜合 LongTrend + RSI
+    def long_advice(row):
+        lt = row["LongTrend"]
+        rsi = row.get(rsi_col, pd.NA)
+        try:
+            rsi = float(rsi)
+        except Exception:
+            return "長線：中立"
+        if lt == "Uptrend" and 30 <= rsi <= 70:
+            return "長線：持有"
+        if lt == "Downtrend" and rsi < 30:
+            return "長線：觀望/分批"
+        if lt == "Downtrend" and rsi > 70:
+            return "長線：迴避"
+        return "長線：中立"
+
+    out["長線建議"] = out.apply(long_advice, axis=1)
+
     return out
 
 
 # -------- Google Sheets --------
 def gsheet_client():
     scopes = ["https://www.googleapis.com/auth/spreadsheets"]
-    # workflow 已把 JSON 寫到 $RUNNER_TEMP/sa.json，這裡用環境變數路徑
     import os
 
     sa_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
@@ -126,22 +199,43 @@ def write_dataframe(ws, df: pd.DataFrame):
         print("⚠️ No data to write.")
         return
 
-    # 欄位順序
+    rsi_len = int(cfg.get("rsi_length", 14))
+
     cols = (
-        ["Date", "Ticker", "Name", "Open", "High", "Low", "Close", "Volume"]
-        + [f"RSI_{cfg['rsi_length']}"]
-        + [f"SMA_{w}" for w in cfg["sma_windows"]]
-        + ["BB_20_Basis", "BB_20_Upper", "BB_20_Lower", "BB_20_Width"]
+        [
+            "Date",
+            "Ticker",
+            "Name",
+            "Open",
+            "High",
+            "Low",
+            "Close",
+            "Volume",
+            f"RSI_{rsi_len}",
+            "SMA_20",
+            "SMA_50",
+            "SMA_200",
+            "BB_20_Basis",
+            "BB_20_Upper",
+            "BB_20_Lower",
+            "BB_20_Width",
+            "LongTrend",
+            "ShortTrend",
+            "EntryZone",
+            "ExitZone",
+            "ShortSignal",
+            "短線建議",
+            "長線建議",
+        ]
     )
-    # 只保留表內存在的欄位
+
+    # 僅保留真的存在的欄位
     cols = [c for c in cols if c in df.columns]
 
-    # 轉為 2D array
-    values = [cols] + df.loc[:, cols].astype(object).where(pd.notna(df), "").values.tolist()
-
-    # 清空表格（保留 A1）
+    # 先清掉 A2 以下，避免殘影
     ws.batch_clear(["A2:Z999999"])
-    # 寫入
+
+    values = [cols] + df.loc[:, cols].astype(object).where(pd.notna(df), "").values.tolist()
     ws.update("A2", values, value_input_option="RAW")
 
     # 台灣時間時間戳
@@ -169,7 +263,7 @@ def main():
             bb_len=int(cfg.get("bb_length", 20)),
             bb_std=float(cfg.get("bb_std", 2)),
         )
-        # 整理欄位
+        # 欄位整理
         df.rename(
             columns={
                 "date": "Date",
