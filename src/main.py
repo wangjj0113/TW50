@@ -108,6 +108,7 @@ def add_indicators(df: pd.DataFrame, ticker: str, cfg: dict) -> pd.DataFrame:
     df.insert(0, "Ticker", ticker)
     df.reset_index(inplace=True)
 
+    # 將日期轉成字串，避免 JSON 序列化錯誤
     if "Date" in df.columns and pd.api.types.is_datetime64_any_dtype(df["Date"]):
         df["Date"] = df["Date"].dt.strftime("%Y-%m-%d")
 
@@ -119,6 +120,11 @@ def add_indicators(df: pd.DataFrame, ticker: str, cfg: dict) -> pd.DataFrame:
     return df.loc[:, [c for c in cols if c in df.columns]]
 
 def filter_candidates(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    長期：Close > SMA_200 且 SMA_20 > SMA_50 且 RSI_14 < 70
+    短線：RSI_14 < 30 或 Close < BB_20_Lower
+    取不重覆前 10 檔
+    """
     long_term  = df[
         (df["Close"] > df["SMA_200"]) &
         (df["SMA_20"] > df["SMA_50"]) &
@@ -177,14 +183,14 @@ def main():
     gc = gspread_client()
     sh = gc.open_by_key(cfg["sheet_id"])
 
-    # 全量資料
+    # 全量資料寫入
     try:
         ws_main = sh.worksheet(cfg["worksheet"])
     except gspread.WorksheetNotFound:
         ws_main = sh.add_worksheet(title=cfg["worksheet"], rows="2000", cols="40")
     write_dataframe(ws_main, out)
 
-    # Top10
+    # 篩選前 10 檔
     top10 = filter_candidates(out)
     top10_name = cfg.get("worksheet_top10", "Top10")
     try:
