@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 import gspread
 from google.oauth2.service_account import Credentials
-from datetime import datetime  # <== 新增導入時間模組
+from datetime import datetime
 
 # 讀取 config.json
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -129,15 +129,15 @@ def gspread_client():
 def write_dataframe(ws, df: pd.DataFrame):
     """
     清空整個工作表後，於 A1 寫入更新時間，
-    然後從 A2 開始寫入資料（欄名 + 列資料）。
+    然後從 A2 開始寫入欄名和資料。這裡以二維 list [[value]] 更新 A1，
+    避免 gspread 的 Invalid value 錯誤。
     """
     ws.clear()
-    # 寫入最後更新時間到 A1
+    # 寫入更新時間到 A1，必須用二維陣列包住字串
     update_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    ws.update("A1", f"Last Update: {update_time}")
-    # 準備欄名與資料
+    ws.update("A1", [[f"Last Update: {update_time}"]])
+    # 整理資料：欄名 + 資料列
     values = [df.columns.tolist()] + df.astype(object).where(pd.notna(df), "").values.tolist()
-    # 從 A2 開始寫入全部數據
     ws.update("A2", values)
 
 # ===== 主流程 =====
@@ -148,7 +148,7 @@ def main():
 
     tickers = cfg.get("tickers", [])
     if not tickers:
-        raise RuntimeError("tickers 為空，而 etf_id 目前無法自動取得成分股，請在 config.json 填入股票代號列表。")
+        raise RuntimeError("tickers 為空，而 etf_id 無法自動取得成分股，請在 config.json 填入股票代號列表。")
 
     frames = []
     for t in tickers:
@@ -164,14 +164,14 @@ def main():
     gc = gspread_client()
     sh = gc.open_by_key(cfg["sheet_id"])
 
-    # 全量資料寫入
+    # 全量資料
     try:
         ws_main = sh.worksheet(cfg["worksheet"])
     except gspread.WorksheetNotFound:
         ws_main = sh.add_worksheet(title=cfg["worksheet"], rows="2000", cols="40")
     write_dataframe(ws_main, out)
 
-    # 篩選前 10 檔
+    # Top10 篩選
     top10 = filter_candidates(out)
     top10_name = cfg.get("worksheet_top10", "Top10")
     try:
