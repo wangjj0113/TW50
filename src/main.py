@@ -1,172 +1,131 @@
-import os
+# src/main.py
 import json
-import requests
+import os
+from datetime import datetime
+import pytz
 import pandas as pd
 import numpy as np
 import gspread
-from datetime import datetime
-from zoneinfo import ZoneInfo
-from google.oauth2.service_account import Credentials
+from oauth2client.service_account import ServiceAccountCredentials
+from FinMind.finmind import FinMind
 
-# ====== 技術指標 ======
-def rsi(series, period=14):
+# 計算 RSI
+def calc_rsi(series: pd.Series, period: int) -> pd.Series:
     delta = series.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(period).mean()
-    rs = gain / loss
-    return 100 - (100 / (1 + rs))
+    gain = delta.where(delta > 0, 0.0)
+    loss = -delta.where(delta < 0, 0.0)
+    avg_gain = gain.rolling(window=period, min_periods=period).mean()
+    avg_loss = loss.rolling(window=period, min_periods=period).mean()
+    rs = avg_gain / avg_loss
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
 
-def sma(series, window):
-    return series.rolling(window).mean()
+# 計算布林通道
+def calc_bbands(series: pd.Series, length: int, n_std: float) -> tuple:
+    basis = series.rolling(length).mean()
+    dev = n_std * series.rolling(length).std()
+    upper = basis + dev
+    lower = basis - dev
+    width = (upper - lower) / basis
+    return basis, upper, lower, width
 
-def bbands(series, window=20, num_std=2):
-    sma_ = series.rolling(window).mean()
-    std_ = series.rolling(window).std()
-    upper = sma_ + num_std * std_
-    lower = sma_ - num_std * std_
-    width = upper - lower
-    return sma_, upper, lower, width
-
-# 股票代號 → 中文名稱
-NAME_MAP = {
-    "2330": "台積電",
-    "2317": "鴻海",
-    "2881": "富邦金",
-    "2882": "國泰金",
-    "2454": "聯發科",
-    "2308": "台達電",
-    "0050": "元大台灣50",
-}
-
-# ====== FinMind API ======
-def fetch_stock_price(ticker, start_date, end_date, token):
-    url = "https://api.finmindtrade.com/api/v4/data"
-    params = {
-        "dataset": "TaiwanStockPrice",
-        "data_id": ticker,
-        "start_date": start_date,
-        "end_date": end_date,
-        "token": token,
-    }
-    r = requests.get(url, params=params)
-    data = r.json()
-    if "data" not in data or len(data["data"]) == 0:
-        return None
-    df = pd.DataFrame(data["data"])
-    df = df.rename(columns={
-        "date": "Date",
-        "stock_id": "Ticker",
-        "open": "Open",
-        "high": "High",
-        "low": "Low",
-        "close": "Close",
-        "volume": "Volume",
-    })
-    df["Date"] = pd.to_datetime(df["Date"])
+# 擷取個股資料並計算指標
+def get_stock_data(api: FinMind, cfg: dict, ticker: str) -> pd.DataFrame:
+    # 抓取歷史價格
+    raw = api.taiwan_stock_price(
+        dataset="TaiwanStockPrice",
+        data_id=ticker,
+        start_date=cfg["start_date"],
+        end_date=cfg["end_date"],
+    )
+    if not raw:
+        raise RuntimeError(f"No data fetched for {ticker}")
+    df = pd.DataFrame(raw)
+    # 計算技術指標
+    df["RSI_14"] = calc_rsi(df["close"], cfg["rsi_length"])
+    for w in cfg["sma_windows"]:
+        df[f"SMA_{w}"] = df["close"].rolling(window=w).mean()
+    basis, upper, lower, width = calc_bbands(df["close"], cfg["bb_length"], cfg["bb_std"])
+    df[f"BB_{cfg['bb_length']}_Basis"] = basis
+    df[f"BB_{cfg['bb_length']}_Upper"] = upper
+    df[f"BB_{cfg['bb_length']}_Lower"] = lower
+    df[f"BB_{cfg['bb_length']}_Width"] = width
+    df["ticker"] = ticker
     return df
 
-# ====== 加入技術指標 ======
-def add_indicators(df, cfg):
-    close = df["Close"]
-
-    # RSI
-    rsi_len = int(cfg.get("rsi_length", 14))
-    df[f"RSI_{rsi_len}"] = rsi(close, rsi_len)
-
-    # SMA
-    for w in cfg.get("sma_windows", [20, 50, 200]):
-        df[f"SMA_{w}"] = sma(close, w)
-
-    # 布林通道
-    bb_len = int(cfg.get("bb_length", 20))
-    bb_std = float(cfg.get("bb_std", 2))
-    basis, upper, lower, width = bbands(close, bb_len, bb_std)
-    df[f"BB_{bb_len}_Basis"] = basis
-    df[f"BB_{bb_len}_Upper"] = upper
-    df[f"BB_{bb_len}_Lower"] = lower
-    df[f"BB_{bb_len}_Width"] = width
-
-    # 短線訊號
-    df["ShortSignal"] = np.where(
-        (df[f"RSI_{rsi_len}"] < 30) | (df["Close"] < df[f"BB_{bb_len}_Lower"]),
-        "Buy",
-        np.where(
-            (df[f"RSI_{rsi_len}"] > 70) | (df["Close"] > df[f"BB_{bb_len}_Upper"]),
-            "Sell",
-            "Neutral"
-        )
+# 取得股票代號對應名稱
+def get_stock_name(api: FinMind, ticker: str) -> str:
+    info = api.taiwan_stock_info(
+        dataset="TaiwanStockInfo",
+        data_id=ticker
     )
+    return info[0]["stock_name"] if info else ticker
 
-    # 長期趨勢
-    df["LongTrend"] = np.where(
-        (df["Close"] > df["SMA_200"]) & (df["SMA_20"] > df["SMA_50"]),
-        "Uptrend",
-        np.where(
-            (df["Close"] < df["SMA_200"]) & (df["SMA_20"] < df["SMA_50"]),
-            "Downtrend",
-            "Neutral"
-        )
-    )
+# 寫入 Google Sheets
+def write_to_sheets(ws, df: pd.DataFrame, title_cell: str, title_text: str):
+    # 標題寫在第一列第一欄
+    ws.update(title_cell, title_text)
+    # 將 dataframe 欄位和資料轉成列表並一次寫入
+    data = [df.columns.tolist()] + df.fillna("").astype(str).values.tolist()
+    # 第二列第一欄開始寫入
+    ws.update("A2", data)
 
-    # 股票名稱
-    df["Name"] = df["Ticker"].map(NAME_MAP).fillna(df["Ticker"])
-
-    return df
-
-# ====== Google Sheets ======
-def get_gspread_client():
-    sa_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
-    scopes = ["https://www.googleapis.com/auth/spreadsheets"]
-    creds = Credentials.from_service_account_file(sa_path, scopes=scopes)
-    return gspread.authorize(creds)
-
-def write_dataframe(ws, df):
-    values = [df.columns.tolist()] + df.astype(object).where(pd.notna(df), "").values.tolist()
-    ws.clear()
-    ws.update("A2", values)
-    # 更新時間戳
-    now = datetime.now(ZoneInfo("Asia/Taipei")).strftime("%Y-%m-%d %H:%M:%S")
-    ws.update("A1", f"Last Update (Asia/Taipei): {now}")
-
-# ====== 主程式 ======
-def main():
-    # 載入 config
-    with open("config.json", "r", encoding="utf-8") as f:
+def main() -> None:
+    # 讀取設定檔
+    with open("config.json", encoding="utf-8") as f:
         cfg = json.load(f)
-
-    tickers = cfg["tickers"]
-    start_date = cfg.get("start_date", "2025-01-01")
-    end_date = cfg.get("end_date", "2025-12-31")
-    sheet_id = cfg["sheet_id"]
-
-    token = os.environ.get("FINMIND_TOKEN", "")
-
-    all_data = []
-    for t in tickers:
-        df = fetch_stock_price(t, start_date, end_date, token)
-        if df is None:
-            continue
-        df = add_indicators(df, cfg)
-        all_data.append(df)
-
-    if not all_data:
-        raise RuntimeError("No data fetched")
-
-    result = pd.concat(all_data, ignore_index=True)
-
-    # 建立 Sheets 連線
-    client = get_gspread_client()
-    sh = client.open_by_key(sheet_id)
-
-    # 主表 TW50
-    ws_main = sh.worksheet(cfg.get("worksheet", "TW50"))
-    write_dataframe(ws_main, result)
-
-    # Top10
-    ws_top10 = sh.worksheet(cfg.get("worksheet_top10", "Top10"))
-    result_latest = result.sort_values(["Date", f"RSI_{cfg['rsi_length']}"]).drop_duplicates("Ticker", keep="last")
-    top10 = result_latest.head(10)
-    write_dataframe(ws_top10, top10)
+    # 初始化 FinMind 客戶端
+    api = FinMind()
+    api.login_by_token(cfg.get("finmind_token"))
+    # 抓取每檔股票資料
+    frames = []
+    names_map = {}
+    for ticker in cfg["tickers"]:
+        df = get_stock_data(api, cfg, ticker)
+        name = get_stock_name(api, ticker)
+        names_map[ticker] = name
+        frames.append(df)
+    # 合併全部股票資料
+    all_df = pd.concat(frames).reset_index(drop=True)
+    # 換成公司名稱欄位
+    all_df.insert(1, "Name", all_df["ticker"].map(names_map))
+    # 依日期排序
+    all_df.sort_values(by=["date", "ticker"], inplace=True)
+    # 建立推薦欄位：RSI < 30 -> Buy；> 70 -> Sell；其他 -> Hold
+    def classify(row):
+        rsi = row["RSI_14"]
+        if rsi < 30:
+            return "Buy"
+        if rsi > 70:
+            return "Sell"
+        return "Hold"
+    all_df["Recommend"] = all_df.apply(classify, axis=1)
+    # 生成 Top10 清單：以 RSI 由高到低排序取得前10檔最新日期資料
+    latest_date = all_df["date"].max()
+    latest_df = all_df[all_df["date"] == latest_date]
+    top10 = latest_df.nlargest(10, "RSI_14").copy().reset_index(drop=True)
+    # 寫入 Google Sheets
+    scope = ["https://www.googleapis.com/auth/spreadsheets"]
+    creds = ServiceAccountCredentials.from_json_keyfile_name(
+        os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"], scope)
+    client = gspread.authorize(creds)
+    spreadsheet = client.open_by_key(cfg["sheet_id"])
+    ws_main = spreadsheet.worksheet(cfg["worksheet"])
+    ws_top = spreadsheet.worksheet(cfg["worksheet_top10"])
+    # 更新工作表資料與更新時間
+    now_taipei = datetime.now(pytz.timezone("Asia/Taipei")).strftime("%Y-%m-%d %H:%M:%S")
+    write_to_sheets(
+        ws_main,
+        all_df,
+        "A1",
+        f"Last Update (Taipei): {now_taipei}"
+    )
+    write_to_sheets(
+        ws_top,
+        top10,
+        "A1",
+        f"Last Update (Taipei): {now_taipei}"
+    )
 
 if __name__ == "__main__":
     main()
