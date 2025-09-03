@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-TW50 / Top10 自動化主程式（安全寫入 + 中文名稱 + Top10欄位排序優化）
+TW50 / Top10 自動化主程式（安全寫入 + 中文名稱 + Top10欄位排序 + 防呆MultiIndex）
 - 指標：SMA20/50/200、RSI14、Bollinger(20)
 - Top10：依 RSI14↓、Volume↓ 排序；優先顯示 Ticker/Name/Close/RSI14/Volume 與建議進出場
 - A1：台北時區時間戳
+- 防呆：就算誤把多檔代號寫成一個字串，亦能攤平或抽出第一檔避免 'Volume not unique'
 """
 
 import os
@@ -57,8 +58,26 @@ def taipei_now_str() -> str:
 # ========= 指標計算 =========
 
 def fetch_history(ticker: str, period: str, interval: str) -> pd.DataFrame:
+    """
+    盡量以「單一代號」抓；若誤傳多檔（導致 MultiIndex），自動抽出第一檔避免 Volume 重複造成錯誤。
+    """
     df = yf.download(ticker, period=period, interval=interval, auto_adjust=False, progress=False)
-    df = df.rename(columns=str.title)
+
+    # 若回來是 MultiIndex 欄位（通常是一次抓多檔），處理一下
+    if isinstance(df.columns, pd.MultiIndex):
+        # 第二層通常是代號
+        level1_vals = list(df.columns.levels[1])
+        # 若只有一個代號 → 直接抽那一層
+        if len(level1_vals) == 1:
+            df = df.xs(level1_vals[0], axis=1, level=1)
+        else:
+            # 多個代號被塞進來（大概率是 tickers 誤傳為單一字串）
+            # 抽第一個代號，避免 'Volume' label not unique
+            pick = level1_vals[0]
+            df = df.xs(pick, axis=1, level=1)
+
+    # 統一欄位命名
+    df = df.rename(columns=str.title)  # open/close → Open/Close
     df.index.name = "Date"
     return df
 
@@ -109,8 +128,8 @@ def build_tw50_table(tickers: List[str], period: str, interval: str) -> pd.DataF
 
     # 統一欄位順序（便於閱讀）
     pref = [
-        "Date", "Ticker", "Name", "Close", "Volume",
-        "RSI14", "SMA20", "SMA50", "SMA200",
+        "Date", "Ticker", "Name", "Close", "RSI14", "Volume",
+        "SMA20", "SMA50", "SMA200",
         "Open", "High", "Low",
         "BB_Lower", "BB_Mid", "BB_Upper"
     ]
