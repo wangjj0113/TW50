@@ -1,5 +1,6 @@
-pandas
-numpy
-yfinance
-gspread
-google-auth
+pandas==2.2.2
+numpy==1.26.4
+yfinance==0.2.65
+gspread==6.1.4
+google-auth==2.33.0
+google-auth-oauthlib==1.2.1
