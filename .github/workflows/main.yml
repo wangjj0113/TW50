@@ -33,7 +33,9 @@ jobs:
           pip install -r requirements.txt
 
       - name: Echo mode
-        run: echo "MODE=${MODE}"
+        run: |
+          echo "BRANCH=${GITHUB_REF}"
+          echo "MODE=${MODE}"
 
       - name: Run main.py (test)
         run: python src/main.py
