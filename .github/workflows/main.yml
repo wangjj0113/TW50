@@ -2,37 +2,36 @@ name: TA-to-Sheets
 
 on:
   workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Select mode'
+        required: true
+        options: [dev, prod]
+        default: dev
 
 jobs:
   run:
     runs-on: ubuntu-latest
+    env:
+      MODE: ${{ github.event.inputs.mode || 'dev' }}
+      GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+      SHEET_ID: ${{ secrets.SHEET_ID }}
     steps:
-      - name: Checkout
+      - name: Checkout (use selected branch)
         uses: actions/checkout@v4
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.10"
+          python-version: "3.11"
 
-      - name: Upgrade pip tooling
+      - name: Install deps
         run: |
-          python -m pip install --upgrade "pip<24" "setuptools<70" wheel
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
-      - name: Install dependencies
-        run: |
-          pip install --no-cache-dir --upgrade --force-reinstall -r requirements.txt
+      - name: Echo mode
+        run: echo "MODE=${MODE}"
 
-      - name: Write service account key
-        env:
-          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-        run: |
-          echo "$GOOGLE_SERVICE_ACCOUNT_JSON" > $RUNNER_TEMP/sa.json
-
-      - name: Run script
-        env:
-          GOOGLE_APPLICATION_CREDENTIALS: ${{ runner.temp }}/sa.json
-          FINMIND_TOKEN: ${{ secrets.FINMIND_TOKEN }}
-          SHEET_ID: ${{ secrets.SHEET_ID }}
-        run: |
-          python src/main.py
+      - name: Run main.py
+        run: python src/main.py
