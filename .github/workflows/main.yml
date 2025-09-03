@@ -1,30 +1,32 @@
-name: TA-to-Sheets-Prod
+name: TW50 Auto Update
 
 on:
-  workflow_dispatch:
+  schedule:
+    # 台灣時間 08:30 與 20:30 (換算成 UTC: -8 小時)
+    - cron: "30 0 * * *"   # UTC 00:30 = 台北 08:30
+    - cron: "30 12 * * *"  # UTC 12:30 = 台北 20:30
+  workflow_dispatch:       # 允許手動觸發
 
 jobs:
-  run:
+  update-tw50:
     runs-on: ubuntu-latest
-    env:
-      MODE: prod
-      GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-      SHEET_ID: ${{ secrets.SHEET_ID }}
-    steps:
-      - name: Checkout (main)
-        uses: actions/checkout@v4
-        with:
-            ref: main
 
-      - name: Setup Python
+    env:
+      GCP_SERVICE_ACCOUNT_JSON: ${{ secrets.GCP_SERVICE_ACCOUNT_JSON }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install deps
+      - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
+          pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run main.py (prod)
+      - name: Run TW50 script
         run: python src/main.py
