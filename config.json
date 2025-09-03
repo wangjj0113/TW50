@@ -1,7 +1,16 @@
 {
-  "tickers": ["2330", "2317", "2454", "...", "2881"], 
+  "mode": "prod",
+  "sheet_id": "1bbayENgn4ZuQ5ltKV_7twO1kC3GlYg6vj_DKGw2oHXY",
+  "tickers": [
+    "2330.TW", "2317.TW", "2454.TW", "2308.TW", "2882.TW",
+    "2881.TW", "1303.TW", "2303.TW", "6505.TW", "2412.TW",
+    "5880.TW", "2886.TW", "2891.TW", "2885.TW", "1326.TW",
+    "2884.TW", "2002.TW", "1301.TW", "1216.TW", "3008.TW"
+  ],
+  "start_date": "2024-01-01",
+  "end_date": "2025-12-31",
   "sheets": {
-    "dev":  { "tw50": "TW50_test",  "top10": "Top10_test",  "sheet_id": "1bbayENgn4ZuQ5ltKV_7twO1kC3GlYg6vj_DKGw2oHXY" },
-    "prod": { "tw50": "TW50",       "top10": "Top10",       "sheet_id": "1bbayENgn4ZuQ5ltKV_7twO1kC3GlYg6vj_DKGw2oHXY" }
+    "dev":  { "tw50": "TW50_test",  "top10": "Top10_test" },
+    "prod": { "tw50": "TW50",       "top10": "Top10" }
   }
 }
