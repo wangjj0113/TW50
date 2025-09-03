@@ -1,7 +1,34 @@
 {
-  "tickers": ["2330.TW", "2317.TW", "2454.TW", "2882.TW", "2881.TW"],
-  "sheet_id": "1bbayENgn4ZuQ5ltKV_7twO1kC3GlYg6vj_DKGw2oHXY",
+  "sheet_id": "{
+  "sheet_id": "你的 Google Sheet ID",
   "worksheet": "TW50",
-  "mode": "dev",
-  "timezone": "Asia/Taipei"
+  "tickers": ["2330.TW", "2454.TW", "2317.TW"],
+  "google_credentials_json": {
+    "type": "service_account",
+    "project_id": "你的 project_id",
+    "private_key_id": "你的 private_key_id",
+    "private_key": "-----BEGIN PRIVATE KEY-----\n你的金鑰內容\n-----END PRIVATE KEY-----\n",
+    "client_email": "你的 service account email",
+    "client_id": "你的 client_id",
+    "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+    "token_uri": "https://oauth2.googleapis.com/token",
+    "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+    "client_x509_cert_url": "你的 client_x509_cert_url"
+  }
+}
+",
+  "worksheet": "TW50",
+  "tickers": ["2330.TW", "2454.TW", "2317.TW"],
+  "google_credentials_json": {
+    "type": "service_account",
+    "project_id": "你的 project_id",
+    "private_key_id": "你的 private_key_id",
+    "private_key": "-----BEGIN PRIVATE KEY-----\n你的金鑰內容\n-----END PRIVATE KEY-----\n",
+    "client_email": "你的 service account email",
+    "client_id": "你的 client_id",
+    "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+    "token_uri": "https://oauth2.googleapis.com/token",
+    "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+    "client_x509_cert_url": "你的 client_x509_cert_url"
+  }
 }
