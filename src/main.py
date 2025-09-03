@@ -2,112 +2,82 @@ import os
 import json
 import pandas as pd
 import yfinance as yf
-from datetime import datetime, timedelta, timezone
 import gspread
 from gspread_dataframe import set_with_dataframe
+from datetime import datetime, timezone, timedelta
 
-
-# ========= 公用：連接 Google Sheet =========
+# 連線到 Google Sheet
 def connect_google_sheet():
-    creds = json.loads(os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON"))
+    creds = json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"])
     client = gspread.service_account_from_dict(creds)
-    sheet_id = os.getenv("SHEET_ID")
+    sheet_id = os.environ["SHEET_ID"]
     return client.open_by_key(sheet_id)
 
-
-# ========= 公用：寫入更新時間 =========
-def write_timestamp(ws, cell="A1", label="Last Update (Asia/Taipei)"):
-    """
-    在指定工作表 ws 的 cell（預設 A1）寫入「Last Update (Asia/Taipei): YYYY-MM-DD HH:MM:SS」。
-    """
-    taipei_now = datetime.now(timezone(timedelta(hours=8))).strftime("%Y-%m-%d %H:%M:%S")
-    ws.update(cell, [[f"{label}: {taipei_now}"]])
-
-
-# ========= 技術指標計算 =========
+# 計算技術指標
 def add_indicators(df, sma_windows=[20, 50, 200], rsi_len=14, bb_len=20):
-    """計算 SMA、RSI、布林通道"""
-    df = df.copy()
-    for w in sma_windows:
-        df[f"SMA_{w}"] = df["Close"].rolling(window=w).mean()
+    df["SMA_20"] = df["Close"].rolling(20).mean()
+    df["SMA_50"] = df["Close"].rolling(50).mean()
+    df["SMA_200"] = df["Close"].rolling(200).mean()
 
     # RSI
     delta = df["Close"].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=rsi_len).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=rsi_len).mean()
+    gain = (delta.where(delta > 0, 0)).rolling(rsi_len).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(rsi_len).mean()
     rs = gain / loss
-    df["RSI"] = 100 - (100 / (1 + rs))
+    df["RSI_14"] = 100 - (100 / (1 + rs))
 
     # 布林通道
-    df["BB_Mid"] = df["Close"].rolling(window=bb_len).mean()
-    df["BB_Std"] = df["Close"].rolling(window=bb_len).std()
+    df["BB_Mid"] = df["Close"].rolling(bb_len).mean()
+    df["BB_Std"] = df["Close"].rolling(bb_len).std()
     df["BB_Upper"] = df["BB_Mid"] + 2 * df["BB_Std"]
     df["BB_Lower"] = df["BB_Mid"] - 2 * df["BB_Std"]
 
+    # 簡單買賣訊號
+    df["ShortTrend"] = df["SMA_20"] > df["SMA_50"]
+    df["LongTrend"] = df["SMA_50"] > df["SMA_200"]
+
     return df
 
+# 更新 Google Sheet
+def write_sheet(ws, df):
+    ws.clear()
+    set_with_dataframe(ws, df)
 
-# ========= 交易訊號 =========
-def add_signals(df):
-    df["ShortTrend"] = df.apply(lambda x: "Buy" if x["Close"] > x["SMA_20"] else "Sell", axis=1)
-    df["LongTrend"] = df.apply(lambda x: "Buy" if x["Close"] > x["SMA_200"] else "Sell", axis=1)
-    return df
+def write_timestamp(ws):
+    now = datetime.now(timezone(timedelta(hours=8)))  # 台北時間
+    ws.update("A1", f"Last Update (Asia/Taipei): {now.strftime('%Y-%m-%d %H:%M:%S')}")
 
-
-# ========= 主程式 =========
 def main():
-    mode = os.getenv("MODE", "dev")
-    print(f"[INFO] MODE={mode}")
+    mode = os.environ.get("MODE", "dev")
+    sheet = connect_google_sheet()
 
-    # 讀取設定檔
-    with open("config.json", "r", encoding="utf-8") as f:
+    # 讀取 config.json
+    with open("config.json", "r") as f:
         cfg = json.load(f)
 
-    tw50_name = cfg[mode]["TW50"]
-    top10_name = cfg[mode]["Top10"]
+    if mode not in cfg:
+        raise RuntimeError(f"❌ config.json 缺少 {mode} 設定")
 
-    print(f"[INFO] config 表單名稱: TW50={tw50_name}, Top10={top10_name}")
-
-    # 連接 Google Sheet
-    gs = connect_google_sheet()
-    ws_tw50 = gs.worksheet(tw50_name)
-    ws_top10 = gs.worksheet(top10_name)
-
-    # 股票代碼
-    tickers = cfg["tickers"]
-    print(f"[INFO] tickers: {tickers}")
-
-    # 抓取資料
-    data = []
-    for t in tickers:
-        print(f"[DL] {t} ...")
-        df = yf.download(t, period="6mo", interval="1d", progress=False)
-        if df.empty:
-            print(f"[WARN] {t} 沒有資料")
+    for name, sheet_name in cfg[mode].items():
+        tickers = cfg["tickers"].get(name, [])
+        if not tickers:
+            print(f"⚠️ {name} 沒有設定 tickers，跳過")
             continue
-        df = add_indicators(df)
-        df = add_signals(df)
-        df["Ticker"] = t
-        df["Date"] = df.index.strftime("%Y-%m-%d")
-        data.append(df)
 
-    if not data:
-        raise RuntimeError("沒有成功下載任何股票資料")
+        print(f"[INFO] 下載 {name}: {tickers}")
+        data = yf.download(tickers, period="6mo", interval="1d", group_by="ticker", auto_adjust=True)
 
-    all_df = pd.concat(data)
+        frames = []
+        for t in tickers:
+            df = data[t].copy()
+            df["Ticker"] = t
+            df = add_indicators(df)
+            frames.append(df)
 
-    # ========== 寫入 TW50 Sheet ==========
-    set_with_dataframe(ws_tw50, all_df.reset_index(drop=True))
-    write_timestamp(ws_tw50)
-
-    # ========== 寫入 Top10 Sheet ==========
-    last_df = all_df.groupby("Ticker").tail(1)
-    set_with_dataframe(ws_top10, last_df.reset_index(drop=True))
-    write_timestamp(ws_top10)
-
-    print("[INFO] ✅ 完成寫入 Google Sheets")
-
+        full = pd.concat(frames)
+        ws = sheet.worksheet(sheet_name)
+        write_sheet(ws, full.reset_index())
+        write_timestamp(ws)
 
 if __name__ == "__main__":
     main()
-
