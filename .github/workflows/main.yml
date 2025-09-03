@@ -1,24 +1,20 @@
-name: TA-to-Sheets
+name: TA-to-Sheets-Prod
 
 on:
   workflow_dispatch:
-    inputs:
-      mode:
-        description: 'Select mode'
-        required: true
-        options: [dev, prod]
-        default: dev
 
 jobs:
   run:
     runs-on: ubuntu-latest
     env:
-      MODE: ${{ github.event.inputs.mode || 'dev' }}
-      GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+      MODE: prod
+      GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
       SHEET_ID: ${{ secrets.SHEET_ID }}
     steps:
-      - name: Checkout (use selected branch)
+      - name: Checkout (main)
         uses: actions/checkout@v4
+        with:
+            ref: main
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -30,8 +26,5 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Echo mode
-        run: echo "MODE=${MODE}"
-
-      - name: Run main.py
+      - name: Run main.py (prod)
         run: python src/main.py
