@@ -1,84 +1,106 @@
+# src/main.py
 # -*- coding: utf-8 -*-
-"""
-TA to Google Sheets (test)
-環境：GitHub Actions Ubuntu + Python + gspread + yfinance
-重點：
-- 分頁名稱完全由 config.json 指定（支援空格，例如 "Top 10 test"）
-- 不用 apply，全部向量化計算指標與訊號
-- Top10：短線=Buy → 依 RSI(由低到高) 取前10
-- A1 寫入台北時間時間戳
-"""
 
-import os, json, io, sys, time, math, datetime as dt
-from datetime import timezone, timedelta
-
+import os, json, datetime as dt
 import numpy as np
 import pandas as pd
 import yfinance as yf
 import gspread
-from gspread.exceptions import WorksheetNotFound
+from google.oauth2.service_account import Credentials
 
-# ========== 共用 ==========
+# ---------- 基本工具 ----------
 
-def tw_now_str():
-    tw = timezone(timedelta(hours=8))
-    return dt.datetime.now(tw).strftime("%Y-%m-%d %H:%M:%S")
+def now_taipei_str():
+    tz = dt.timezone(dt.timedelta(hours=8))
+    return dt.datetime.now(tz).strftime("%Y-%m-%d %H:%M:%S")
 
-def _load_cfg():
+def load_cfg():
     with open("config.json", "r", encoding="utf-8") as f:
         cfg = json.load(f)
-    env = os.getenv("MODE", cfg.get("mode", "dev"))
-    if env not in ("dev", "prod"):
-        env = "dev"
-    cfg["_env"] = env
+    mode = os.getenv("MODE", cfg.get("mode", "dev")).strip().lower()
+    if mode not in ("dev", "prod"):
+        mode = "dev"
+    cfg["__mode__"] = mode
     return cfg
 
-def _open_sheet(cfg):
-    svc_json = os.getenv("GOOGLE_CREDENTIALS_JSON")
-    if not svc_json:
-        raise RuntimeError("缺少 GOOGLE_CREDENTIALS_JSON（到 Actions → Secrets 設定你的 Service Account JSON）")
-    sa_info = json.loads(svc_json)
-    gc = gspread.service_account_from_dict(sa_info)
-    return gc.open_by_key(cfg["sheet_id"])
+def pick_sheet_names(cfg):
+    mode = cfg["__mode__"]
+    pages = cfg["sheets"][mode]
+    tw50_name = pages["tw50"]
+    top10_name = pages["top10"]
 
-def _get_ws(sh, name):
-    try:
-        return sh.worksheet(name)
-    except WorksheetNotFound as e:
-        exist = [ws.title for ws in sh.worksheets()]
-        raise WorksheetNotFound(
-            f"找不到分頁：{name}\n目前存在：{exist}\n→ 請把 Google Sheet 分頁改成「{name}」，或在 config.json 改成現有名稱。"
-        ) from e
+    # 安全防呆：dev 只能寫 *_test；prod 不能寫 *_test
+    if mode == "dev" and (not tw50_name.endswith("_test") or not top10_name.endswith("_test")):
+        raise RuntimeError("DEV 模式的分頁名稱必須以 _test 結尾，請檢查 config.json")
+    if mode == "prod" and (tw50_name.endswith("_test") or top10_name.endswith("_test")):
+        raise RuntimeError("PROD 模式不得寫入 _test 分頁，請檢查 config.json")
+    return tw50_name, top10_name
 
-def pick_ws_pair(cfg):
-    sh = _open_sheet(cfg)
-    env = cfg["_env"]
-    tw50_name  = cfg["sheets"][env]["tw50"]
-    top10_name = cfg["sheets"][env]["top10"]
-    print(f"[INFO] MODE={env}")
-    print(f"[INFO] 目標分頁：TW50='{tw50_name}', Top10='{top10_name}'")
-    tw50_ws  = _get_ws(sh, tw50_name)
-    top10_ws = _get_ws(sh, top10_name)
-    return tw50_ws, top10_ws
+def with_tw_suffix(codes):
+    out = []
+    for t in codes:
+        t = str(t).strip().upper()
+        if not t:
+            continue
+        out.append(t if t.endswith(".TW") else f"{t}.TW")
+    return out
 
-def with_tw_suffix(ts):
-    return [t if str(t).endswith(".TW") else f"{t}.TW" for t in ts]
+# ---------- 技術指標 ----------
 
-# ========== 下載 & 指標 ==========
+def sma(series, win):
+    return series.rolling(win, min_periods=win).mean()
+
+def rsi_wilder(close, period=14):
+    # 經典 Wilder RSI（向量化，groupby 安全）
+    delta = close.diff()
+    gain = delta.clip(lower=0.0)
+    loss = -delta.clip(upper=0.0)
+
+    # 初始均值
+    avg_gain = gain.rolling(period, min_periods=period).mean()
+    avg_loss = loss.rolling(period, min_periods=period).mean()
+
+    # Wilder 平滑
+    avg_gain = avg_gain.copy()
+    avg_loss = avg_loss.copy()
+    for i in range(period+1, len(close)):
+        if pd.isna(avg_gain.iat[i-1]) or pd.isna(avg_loss.iat[i-1]):
+            continue
+        avg_gain.iat[i] = (avg_gain.iat[i-1]*(period-1) + gain.iat[i]) / period
+        avg_loss.iat[i] = (avg_loss.iat[i-1]*(period-1) + loss.iat[i]) / period
+
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
+def bollinger(close, win=20, num_std=2):
+    ma = close.rolling(win, min_periods=win).mean()
+    sd = close.rolling(win, min_periods=win).std(ddof=0)
+    upper = ma + num_std * sd
+    lower = ma - num_std * sd
+    width = (upper - lower) / ma
+    return ma, upper, lower, width
+
+# ---------- 資料抓取 ----------
 
 def fetch_prices(tickers, start, end):
     """
+    逐檔下載，避免把整組 list 丟給 yfinance 造成型態錯誤。
     回傳欄位：Date, Ticker, Open, High, Low, Close, Volume
     """
     rows = []
     for t in tickers:
+        t = str(t).strip()
+        if not t:
+            continue
         print(f"[DL] {t} ...")
         try:
-            df = yf.download(t, start=start, end=end, progress=False, auto_adjust=False)
+            df = yf.download([t], start=start, end=end, progress=False, auto_adjust=False)
             if df.empty:
                 continue
-            df = df.rename(columns=str.title)  # Open High Low Close Volume
-            df["Ticker"] = t.replace(".TW", "")
+            df = df.rename(columns=str.title)
+            code_no_suffix = t.replace(".TW", "")
+            df["Ticker"] = code_no_suffix
             df.reset_index(inplace=True)
             df["Date"] = pd.to_datetime(df["Date"]).dt.date
             rows.append(df[["Date","Ticker","Open","High","Low","Close","Volume"]])
@@ -90,200 +112,138 @@ def fetch_prices(tickers, start, end):
     out.sort_values(["Ticker","Date"], inplace=True)
     return out
 
-def add_indicators(df, rsi_len=14, sma_windows=(20,50,200), bb_len=20):
-    """
-    以 Ticker 分組計算各種技術指標（向量化）
-    """
+# ---------- 指標計算與中文欄位 ----------
+
+def add_indicators(df, sma_windows=(20,50,200), rsi_len=14, bb_len=20):
     if df.empty:
-        return df
+        return df.assign(
+            RSI_14=[], SMA_20=[], SMA_50=[], SMA_200=[],
+            BB_20_Basis=[], BB_20_Upper=[], BB_20_Lower=[], BB_20_Width=[],
+            ShortTrend=[], LongTrend=[], EntryZone=[], ExitZone=[], ShortSignal=[]
+        )
 
     df = df.copy()
-    df["Close"] = df["Close"].astype(float)
-    df["Volume"] = pd.to_numeric(df["Volume"], errors="coerce").fillna(0)
+    # 逐股票計算
+    def per_stock(g):
+        g = g.sort_values("Date").copy()
+        close = g["Close"]
 
-    def _group(g):
-        g = g.sort_values("Date")
-        # SMA
-        for n in sma_windows:
-            g[f"SMA_{n}"] = g["Close"].rolling(n, min_periods=1).mean()
+        g["SMA_20"]  = sma(close, 20)
+        g["SMA_50"]  = sma(close, 50)
+        g["SMA_200"] = sma(close, 200)
 
-        # RSI(14)
-        delta = g["Close"].diff()
-        up = delta.clip(lower=0)
-        down = (-delta).clip(lower=0)
-        roll_up = up.rolling(rsi_len, min_periods=1).mean()
-        roll_dn = down.rolling(rsi_len, min_periods=1).mean()
-        rs = roll_up / roll_dn.replace(0, np.nan)
-        g["RSI_14"] = 100 - (100 / (1 + rs))
-        g["RSI_14"] = g["RSI_14"].fillna(0)
+        g["RSI_14"] = rsi_wilder(close, period=14)
 
-        # Bollinger(20,2)
-        ma = g["Close"].rolling(bb_len, min_periods=1).mean()
-        sd = g["Close"].rolling(bb_len, min_periods=1).std().fillna(0)
-        g["BB_20_Basis"] = ma
-        g["BB_20_Upper"] = ma + 2*sd
-        g["BB_20_Lower"] = ma - 2*sd
-        g["BB_20_Width"] = (g["BB_20_Upper"] - g["BB_20_Lower"]).abs()
+        bb_mid, bb_up, bb_lo, bb_w = bollinger(close, win=20, num_std=2)
+        g["BB_20_Basis"] = bb_mid
+        g["BB_20_Upper"] = bb_up
+        g["BB_20_Lower"] = bb_lo
+        g["BB_20_Width"] = bb_w
+
+        # 中文欄位（簡化版、一致且穩定）
+        g["ShortTrend"] = np.where(g["SMA_20"] > g["SMA_50"], "Up", np.where(g["SMA_20"] < g["SMA_50"], "Down", "Neutral"))
+        g["LongTrend"]  = np.where(g["SMA_50"] > g["SMA_200"], "Up", np.where(g["SMA_50"] < g["SMA_200"], "Down", "Neutral"))
+
+        g["EntryZone"] = (g["Close"] <= g["BB_20_Lower"])
+        g["ExitZone"]  = (g["Close"] >= g["BB_20_Upper"])
+        g["ShortSignal"] = np.where(g["EntryZone"], "Buy", np.where(g["ExitZone"], "Sell", "Hold"))
 
         return g
 
-    df = df.groupby("Ticker", group_keys=False).apply(_group)
-    return df
+    out = df.groupby("Ticker", group_keys=False).apply(per_stock)
+    return out
 
-def add_signals(df):
-    if df.empty:
-        return df
+# ---------- Google Sheets IO ----------
 
-    close = df["Close"].astype(float)
-    rsi   = df["RSI_14"].astype(float)
-    sma20 = df["SMA_20"].astype(float)
-    sma50 = df["SMA_50"].astype(float)
-    sma200= df["SMA_200"].astype(float)
-    bb_lo = df["BB_20_Lower"].astype(float)
-    bb_hi = df["BB_20_Upper"].astype(float)
+def open_gsheet(sheet_id: str):
+    raw = os.environ.get("GOOGLE_CREDENTIALS_JSON", "").strip()
+    if not raw:
+        raise RuntimeError("找不到 GOOGLE_CREDENTIALS_JSON 環境變數（Secrets）")
+    info = json.loads(raw)
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive"
+    ]
+    creds = Credentials.from_service_account_info(info, scopes=scopes)
+    gc = gspread.authorize(creds)
+    return gc.open_by_key(sheet_id)
 
-    df["ShortTrend"] = np.where(sma20 > sma50, "Up", np.where(sma20 < sma50, "Down", "Neutral"))
-    df["LongTrend"]  = np.where(sma50 > sma200,"Up", np.where(sma50 < sma200,"Down", "Neutral"))
-
-    df["EntryZone"]  = close <= bb_lo
-    df["ExitZone"]   = close >= bb_hi
-    df["多空壓力"]    = close >= bb_hi
-    df["多空支撐"]    = close <= bb_lo
-
-    df["ShortSignal"] = np.where(
-        (rsi < 30) | (close <= bb_lo), "Buy",
-        np.where((rsi > 70) | (close >= bb_hi) | (close < sma20), "Sell", "Hold")
-    )
-    df["LongSignal"] = np.where(
-        (sma50 > sma200) & (sma20 > sma50), "Hold",
-        np.where((sma50 < sma200) & (sma20 < sma50), "Neutral", "Neutral")
-    )
-
-    df["建議理由_短線"] = np.where(
-        df["ShortSignal"]=="Buy",  "RSI<30 或 觸及下軌",
-        np.where(df["ShortSignal"]=="Sell","RSI>70/觸上軌/跌破SMA20","區間整理")
-    )
-    df["建議理由_長線"] = np.where(
-        df["LongSignal"]=="Hold",  "均線多頭排列",
-        np.where(df["LongSignal"]=="Neutral","均線空/盤整","觀望")
-    )
-
-    return df
-
-# ========== Google Sheets I/O ==========
-
-TW50_HEADERS = [
-    "Date","Ticker","Open","High","Low","Close","Volume",
-    "RSI_14","SMA_20","SMA_50","SMA_200",
-    "BB_20_Basis","BB_20_Upper","BB_20_Lower","BB_20_Width",
-    "ShortTrend","LongTrend","EntryZone","ExitZone","ShortSignal","LongSignal",
-    "建議理由_短線","建議理由_長線"
-]
-
-TOP10_HEADERS = [
-    "Date","Ticker","Close","RSI_14","SMA_20","SMA_50","SMA_200",
-    "ShortSignal","建議理由_短線"
-]
-
-def sheet_write_whole(ws, values):
-    """整表覆蓋（保留 A1 時間戳，內容從第2列開始寫）"""
-    # 清掉 A2 以後
-    rows = len(values)
-    cols = len(values[0]) if rows else 1
-    # 先把標題 + 內容寫上去
+def write_dataframe(ws, df: pd.DataFrame, note: str):
+    # 清空 + 寫入
     ws.clear()
-    # A1 時間戳
-    ws.update("A1", [[f"Last Update (Asia/Taipei): {tw_now_str()}"]])
-    # 標題從 A2 寫
-    start_cell = "A2"
-    ws.update(start_cell, values, value_input_option="RAW")
-
-def df_to_values(df, headers):
+    # 時戳在 A1
+    ws.update("A1", [[f"Last Update (Asia/Taipei): {now_taipei_str()}"]])
     if df.empty:
-        return [headers]  # 至少寫入表頭
-    out = df.copy()
-    out = out[headers].copy()
-    # 布林轉成 TRUE/FALSE 便於過濾
-    for c in out.columns:
-        if out[c].dtype == bool:
-            out[c] = out[c].astype(bool)
-    values = [headers] + out.astype(object).where(pd.notnull(out), "").values.tolist()
-    return values
+        return
+    # 欄名 + 內容
+    header = [ 
+        "Date","Ticker","Open","High","Low","Close","Volume",
+        "RSI_14","SMA_20","SMA_50","SMA_200",
+        "BB_20_Basis","BB_20_Upper","BB_20_Lower","BB_20_Width",
+        "ShortTrend","LongTrend","EntryZone","ExitZone","ShortSignal"
+    ]
+    df2 = df.loc[:, header].copy()
+    values = [header] + df2.astype(object).where(pd.notna(df2), "").values.tolist()
+    ws.update("A2", values)  # 從 A2 開始放資料
+    # 註解（可在名稱列上方再寫一行，避免遮到 header）
+    ws.update("A2", [header])  # 保險再寫一次標頭
+    # 額外說明（可選）
+    # ws.update("V1", [[note]])
 
-# ========== Top10 ==========
+# ---------- Top10 邏輯 ----------
 
-def make_top10(df):
-    """短線=Buy → 依 RSI 由低到高 → 取前10"""
+def build_top10(df):
     if df.empty:
-        return pd.DataFrame(columns=TOP10_HEADERS)
-    last = (
-        df.sort_values("Date")
-          .groupby("Ticker", as_index=False)
-          .tail(1)  # 每檔取最後一天
-    )
-    pick = last[last["ShortSignal"]=="Buy"].copy()
-    pick = pick.sort_values("RSI_14", ascending=True).head(10)
-    return pick[TOP10_HEADERS].copy()
+        return pd.DataFrame(columns=["Date","Ticker","Close","RSI_14","ShortSignal"])
+    last = df.sort_values(["Ticker","Date"]).groupby("Ticker", as_index=False).tail(1)
+    pick = last.loc[last["ShortSignal"] == "Buy"].copy()
+    pick = pick.sort_values(["RSI_14","Ticker"], ascending=[True, True]).head(10)
+    # 精簡欄位（給操作頁）
+    out = pick[["Date","Ticker","Close","RSI_14","ShortSignal"]].reset_index(drop=True)
+    return out
 
-# ========== 取得 tickers（config 不寫也行） ==========
-
-def load_tickers_from_sheet(ws):
-    """嘗試從既有 TW50 表抓 Ticker 欄；抓不到就回預設"""
-    try:
-        data = ws.get_all_records()
-        if not data:
-            raise ValueError("empty")
-        series = pd.DataFrame(data).get("Ticker")
-        tickers = [str(t) for t in series.dropna().unique().tolist() if str(t).strip()]
-        tickers = [t for t in tickers if t.isalnum()]  # 粗略過濾
-        if tickers:
-            return tickers
-    except Exception:
-        pass
-    # 預設少量避免打太久
-    return ["2330","2317","2882","2881","2454"]
-
-# ========== Main ==========
+# ---------- 主流程 ----------
 
 def main():
-    cfg = _load_cfg()
-    tw50_ws, top10_ws = pick_ws_pair(cfg)
+    cfg = load_cfg()
+    mode = cfg["__mode__"]
+    tw50_name, top10_name = pick_sheet_names(cfg)
+    sheet_id = cfg["sheet_id"]
+    start = cfg.get("start_date")
+    end   = cfg.get("end_date")
+    codes = cfg.get("tickers", [])
+    print(f"[INFO] MODE={mode}")
+    print(f"[INFO] 分頁對應：TW50={tw50_name}, Top10={top10_name}")
+    if not codes:
+        raise RuntimeError("config.json 缺少 tickers")
 
-    # 取得 tickers（config 沒寫就從表抓；都沒有就用預設）
-    tickers = cfg.get("tickers")
-    if not tickers:
-        print("[INFO] config 未提供 tickers，嘗試從 TW50 分頁讀取現有清單 …")
-        tickers = load_tickers_from_sheet(tw50_ws)
-    print(f"[INFO] Tickers: {tickers}")
+    tickers = with_tw_suffix(codes)
+    print(f"[INFO] config 共有 tickers：自動從 TW50 分頁最終覆寫為準 ——")
+    print(f"[INFO] Tickers: {codes}")
 
-    start = cfg.get("start_date", "2025-01-01")
-    end   = cfg.get("end_date",   dt.date.today().isoformat())
+    # 1) 抓價
+    px = fetch_prices(tickers, start, end)
+    # 2) 指標
+    full = add_indicators(px)
+    # 3) 打開試算表
+    sh = open_gsheet(sheet_id)
+    ws_tw50 = sh.worksheet(tw50_name)
+    ws_top10 = sh.worksheet(top10_name)
 
-    prices = fetch_prices(with_tw_suffix(tickers), start, end)
-    if prices.empty:
-        raise RuntimeError("沒有抓到任何價格資料，請確認 tickers / 日期區間。")
+    # 4) 寫 TW50
+    write_dataframe(ws_tw50, full, note=f"TW50 base data ({mode})")
 
-    base = add_indicators(prices,
-                          rsi_len=cfg.get("rsi_length",14),
-                          sma_windows=tuple(cfg.get("sma_windows",[20,50,200])),
-                          bb_len=cfg.get("bb_length",20))
-    base = add_signals(base)
+    # 5) 產 Top10 並寫入
+    top10 = build_top10(full)
+    ws_top10.clear()
+    ws_top10.update("A1", [[f"Last Update (Asia/Taipei): {now_taipei_str()}"]])
+    if not top10.empty:
+        header = ["Date","Ticker","Close","RSI_14","ShortSignal"]
+        values = [header] + top10.astype(object).where(pd.notna(top10), "").values.tolist()
+        ws_top10.update("A2", values)
+        # ws_top10.update("F1", [["條件：ShortSignal=Buy → RSI 由低到高 → 取前10"]])
 
-    # 寫入 TW50 分頁
-    tw50_values = df_to_values(base, TW50_HEADERS)
-    sheet_write_whole(tw50_ws, tw50_values)
-    print("[OK] TW50 更新完成")
-
-    # Top10
-    top10_df = make_top10(base)
-    top10_values = df_to_values(top10_df, TOP10_HEADERS)
-    sheet_write_whole(top10_ws, top10_values)
-    print("[OK] Top10 更新完成")
+    print("[DONE] Sheets updated.")
 
 if __name__ == "__main__":
-    try:
-        main()
-        print("[DONE]", tw_now_str())
-    except Exception as e:
-        print("[FATAL]", e)
-        sys.exit(1)
+    main()
