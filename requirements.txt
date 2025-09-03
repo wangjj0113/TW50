@@ -1,5 +1,7 @@
-gspread==6.1.4
-google-auth==2.33.0
-yfinance==0.2.65
-pandas==2.2.2
-numpy==1.26.4
+yfinance
+gspread
+gspread-dataframe
+google-auth
+pandas
+numpy
+python-dateutil
