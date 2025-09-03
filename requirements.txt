@@ -4,3 +4,4 @@ pandas==1.5.3
 numpy==1.23.5
 pandas-ta==0.3.14b0
 requests==2.31.0
+gspread-dataframe
