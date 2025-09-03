@@ -1,83 +1,105 @@
 import os
+import io
 import json
-import pandas as pd
-import yfinance as yf
-import gspread
-from gspread_dataframe import set_with_dataframe
 from datetime import datetime, timezone, timedelta
 
-# 連線到 Google Sheet
-def connect_google_sheet():
-    creds = json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"])
-    client = gspread.service_account_from_dict(creds)
-    sheet_id = os.environ["SHEET_ID"]
-    return client.open_by_key(sheet_id)
+import gspread
+from google.oauth2.service_account import Credentials
 
-# 計算技術指標
-def add_indicators(df, sma_windows=[20, 50, 200], rsi_len=14, bb_len=20):
-    df["SMA_20"] = df["Close"].rolling(20).mean()
-    df["SMA_50"] = df["Close"].rolling(50).mean()
-    df["SMA_200"] = df["Close"].rolling(200).mean()
 
-    # RSI
-    delta = df["Close"].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(rsi_len).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(rsi_len).mean()
-    rs = gain / loss
-    df["RSI_14"] = 100 - (100 / (1 + rs))
+def tw_now(tz="Asia/Taipei"):
+    # 簡單處理台北時間（不裝第三方套件）
+    utc_now = datetime.now(timezone.utc)
+    taipei = timezone(timedelta(hours=8))
+    return utc_now.astimezone(taipei).strftime("%Y-%m-%d %H:%M:%S")
 
-    # 布林通道
-    df["BB_Mid"] = df["Close"].rolling(bb_len).mean()
-    df["BB_Std"] = df["Close"].rolling(bb_len).std()
-    df["BB_Upper"] = df["BB_Mid"] + 2 * df["BB_Std"]
-    df["BB_Lower"] = df["BB_Mid"] - 2 * df["BB_Std"]
 
-    # 簡單買賣訊號
-    df["ShortTrend"] = df["SMA_20"] > df["SMA_50"]
-    df["LongTrend"] = df["SMA_50"] > df["SMA_200"]
-
-    return df
-
-# 更新 Google Sheet
-def write_sheet(ws, df):
-    ws.clear()
-    set_with_dataframe(ws, df)
-
-def write_timestamp(ws):
-    now = datetime.now(timezone(timedelta(hours=8)))  # 台北時間
-    ws.update("A1", f"Last Update (Asia/Taipei): {now.strftime('%Y-%m-%d %H:%M:%S')}")
-
-def main():
-    mode = os.environ.get("MODE", "dev")
-    sheet = connect_google_sheet()
-
-    # 讀取 config.json
-    with open("config.json", "r") as f:
+def load_cfg():
+    with open("config.json", "r", encoding="utf-8") as f:
         cfg = json.load(f)
 
-    if mode not in cfg:
-        raise RuntimeError(f"❌ config.json 缺少 {mode} 設定")
+    # 驗證必要欄位
+    missing = []
+    for k in ["sheet_id", "service_account_env_key", "sheets"]:
+        if not cfg.get(k):
+            missing.append(k)
+    if missing:
+        raise RuntimeError(f"config.json 缺少欄位: {', '.join(missing)}")
 
-    for name, sheet_name in cfg[mode].items():
-        tickers = cfg["tickers"].get(name, [])
-        if not tickers:
-            print(f"⚠️ {name} 沒有設定 tickers，跳過")
-            continue
+    mode = os.getenv("MODE", cfg.get("mode", "dev"))
+    if mode not in cfg["sheets"]:
+        raise RuntimeError(f"MODE={mode} 無對應 sheets 設定，請檢查 config.json")
 
-        print(f"[INFO] 下載 {name}: {tickers}")
-        data = yf.download(tickers, period="6mo", interval="1d", group_by="ticker", auto_adjust=True)
+    cfg["mode"] = mode
+    return cfg
 
-        frames = []
-        for t in tickers:
-            df = data[t].copy()
-            df["Ticker"] = t
-            df = add_indicators(df)
-            frames.append(df)
 
-        full = pd.concat(frames)
-        ws = sheet.worksheet(sheet_name)
-        write_sheet(ws, full.reset_index())
-        write_timestamp(ws)
+def connect_google_sheet(cfg):
+    env_key = cfg["service_account_env_key"]
+    sa_json_raw = os.getenv(env_key)
+    if not sa_json_raw:
+        raise RuntimeError(
+            f"GitHub Secrets 未設定 {env_key}，請到 Settings → Secrets and variables → Actions 新增"
+        )
+
+    try:
+        sa_info = json.loads(sa_json_raw)
+    except json.JSONDecodeError:
+        raise RuntimeError(f"{env_key} 不是有效的 JSON 文字，請確認 Secrets 內容")
+
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive",
+    ]
+    credentials = Credentials.from_service_account_info(sa_info, scopes=scopes)
+    gc = gspread.authorize(credentials)
+    sh = gc.open_by_key(cfg["sheet_id"])
+    return sh
+
+
+def ensure_worksheet(sh, title):
+    try:
+        return sh.worksheet(title)
+    except gspread.WorksheetNotFound:
+        # 沒有就自動建立
+        return sh.add_worksheet(title=title, rows=2000, cols=30)
+
+
+def write_timestamp(ws, label="Last Update"):
+    ws.update("A1", [[label + " (Asia/Taipei):", tw_now()]])
+
+
+def write_tickers(ws, tickers):
+    # 標題列
+    ws.update("A3", [["Ticker"]])
+    # 清單
+    if tickers:
+        values = [[t] for t in tickers]
+        ws.update(f"A4:A{3+len(values)}", values)
+
+
+def main():
+    print("[INFO] MODE=", os.getenv("MODE", "dev"))
+    cfg = load_cfg()
+    env = cfg["mode"]
+    print(f"[INFO] 當前目標表: TW50={cfg['sheets'][env]['tw50']}, Top10={cfg['sheets'][env]['top10']}")
+    print(f"[INFO] 將寫入的 tickers: {cfg.get('tickers', [])}")
+
+    sh = connect_google_sheet(cfg)
+
+    # 取得分頁
+    tw50_ws = ensure_worksheet(sh, cfg["sheets"][env]["tw50"])
+    top10_ws = ensure_worksheet(sh, cfg["sheets"][env]["top10"])
+
+    # 寫入時間戳與 tickers（驗證用）
+    write_timestamp(tw50_ws)
+    write_tickers(tw50_ws, cfg.get("tickers", []))
+
+    write_timestamp(top10_ws)
+    write_tickers(top10_ws, cfg.get("tickers", []))
+
+    print("[OK] 已成功寫入 TW50 與 Top10 分頁（時間戳與 Tickers）。")
+
 
 if __name__ == "__main__":
     main()
