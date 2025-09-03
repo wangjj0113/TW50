@@ -1,21 +1,25 @@
-name: TA-to-Sheets (test only)
+name: TA-to-Sheets
 
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "環境模式"
+        required: true
+        default: dev
+        type: choice
+        options:
+          - dev
+          - prod
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    # 只允許從 test 分支觸發；否則直接跳過
-    if: github.ref == 'refs/heads/test'
     env:
-      MODE: dev
+      MODE: ${{ github.event.inputs.mode || 'dev' }}
       GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
 
     steps:
-      - name: Guardrail (ref check)
-        run: echo "OK: running on ${GITHUB_REF}"
-
       - name: Checkout (use selected branch)
         uses: actions/checkout@v4
 
