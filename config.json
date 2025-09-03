@@ -3,12 +3,12 @@
   "mode": "dev",
 
   "sheets": {
-    "dev":   { "tw50": "TW50_test",  "top10": "Top10_test" },
-    "prod":  { "tw50": "TW50",       "top10": "Top10" }
+    "dev":   { "TW50": "TW50_test",  "Top10": "Top10_test" },
+    "prod":  { "TW50": "TW50",       "Top10": "Top10" }
   },
 
-  "dev":   { "tw50": "TW50_test",  "top10": "Top10_test" },
-  "prod":  { "tw50": "TW50",       "top10": "Top10" },
+  "dev":   { "TW50": "TW50_test",  "Top10": "Top10_test" },
+  "prod":  { "TW50": "TW50",       "Top10": "Top10" },
 
   "rsi_length": 14,
   "sma_windows": [20, 50, 200],
