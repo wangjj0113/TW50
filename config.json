@@ -1,13 +1,7 @@
 {
-  "mode": "dev",
+  "tickers": ["2330.TW", "2317.TW", "2454.TW", "2882.TW", "2881.TW"],
   "sheet_id": "1bbayENgn4ZuQ5ltKV_7twO1kC3GlYg6vj_DKGw2oHXY",
-  "sheets": {
-    "prod": { "tw50": "TW50",      "top10": "Top10" },
-    "dev":  { "tw50": "TW50_test", "top10": "Top10_test" }
-  },
-  "rsi_length": 14,
-  "sma_windows": [20, 50, 200],
-  "bb_length": 20,
-  "start_date": "2025-01-01",
-  "end_date": "2025-12-31"
+  "worksheet": "TW50",
+  "mode": "dev",
+  "timezone": "Asia/Taipei"
 }
