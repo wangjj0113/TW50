@@ -4,21 +4,18 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "環境模式"
+        description: 'Select mode'
         required: true
+        options: [dev, prod]
         default: dev
-        type: choice
-        options:
-          - dev
-          - prod
 
 jobs:
   run:
     runs-on: ubuntu-latest
     env:
       MODE: ${{ github.event.inputs.mode || 'dev' }}
-      GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
-
+      GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+      SHEET_ID: ${{ secrets.SHEET_ID }}
     steps:
       - name: Checkout (use selected branch)
         uses: actions/checkout@v4
