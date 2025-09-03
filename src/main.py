@@ -2,9 +2,8 @@
 """
 TW50 / Top10 自動化（test 版）
 - 強制 dev：只寫 *_test 分頁
-- 分頁不存在會自動建立
-- Top10 輸出：建議理由 / 建議進場區間 / 建議出場區間
-- 全程印出 [DEBUG] 日誌
+- Top10 會輸出：建議理由 / 建議進場區間 / 建議出場區間
+- 全程印出 [DEBUG] 日誌，方便在 GitHub Actions 追蹤
 """
 
 import os, json, math
@@ -89,38 +88,32 @@ def add_indicators(df, cfg):
 
     def _per_symbol(g: pd.DataFrame):
         g = g.sort_values("日期").reset_index(drop=True)
-
-        # 這裡都用單欄 Series 或 .values，避免 2D 資料塞入單欄
         close = g["收盤"]
 
-        g["SMA20"]  = close.rolling(sma_w[0]).mean().values
-        g["SMA50"]  = close.rolling(sma_w[1]).mean().values
-        g["SMA200"] = close.rolling(sma_w[2]).mean().values
+        # 用 .to_numpy().ravel() 強制轉成 1D，避免 "Expected 1D array" 錯誤
+        g["SMA20"]  = close.rolling(sma_w[0]).mean().to_numpy().ravel()
+        g["SMA50"]  = close.rolling(sma_w[1]).mean().to_numpy().ravel()
+        g["SMA200"] = close.rolling(sma_w[2]).mean().to_numpy().ravel()
 
-        # RSI (簡化)
         delta = close.diff()
         up = delta.clip(lower=0).rolling(rsi_n).mean()
         down = (-delta.clip(upper=0)).rolling(rsi_n).mean()
         rs = up / down
-        g["RSI14"] = (100 - (100 / (1 + rs))).values
+        g["RSI14"] = (100 - (100 / (1 + rs))).to_numpy().ravel()
 
-        # 布林
         ma = close.rolling(bb_n).mean()
         std = close.rolling(bb_n).std()
-        g["BB_Mid"] = ma.values
-        g["BB_Up"]  = (ma + bb_k*std).values
-        g["BB_Low"] = (ma - bb_k*std).values
-        with pd.option_context('mode.use_inf_as_na', True):
-            width = (g["BB_Up"] - g["BB_Low"]) / ma
-        g["BB_Width"] = width.values
+        g["BB_Mid"] = ma.to_numpy().ravel()
+        g["BB_Up"]  = (ma + bb_k*std).to_numpy().ravel()
+        g["BB_Low"] = (ma - bb_k*std).to_numpy().ravel()
+        width = (g["BB_Up"] - g["BB_Low"]) / ma
+        g["BB_Width"] = width.to_numpy().ravel()
 
-        # 中文趨勢（單欄）
         g["短線趨勢"] = ["上升" if a>b else "下降" if a<b else "中立"
                         for a,b in zip(g["SMA20"], g["SMA50"])]
         g["長線趨勢"] = ["上升" if a>b else "下降" if a<b else "中立"
                         for a,b in zip(g["SMA50"], g["SMA200"])]
 
-        # 建議（單欄）
         def _short_suggest(r):
             if pd.isna(r): return "觀望"
             if r < 30: return "買入"
@@ -129,6 +122,7 @@ def add_indicators(df, cfg):
         g["短線建議"] = [_short_suggest(r) for r in g["RSI14"]]
         g["長線建議"] = ["持有" if (s50 > s200) else "觀望" if pd.notna(s50) and pd.notna(s200) else "中立"
                           for s50, s200 in zip(g["SMA50"], g["SMA200"])]
+
         return g
 
     out = df.groupby("代號", group_keys=False).apply(_per_symbol)
