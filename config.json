@@ -1,18 +1,15 @@
 {
   "sheet_id": "1bbayENgn4ZuQ5ltKV_7twO1kC3GlYg6vj_DKGw2oHXY",
+  "timezone": "Asia/Taipei",
+
+  "service_account_env_key": "GOOGLE_SERVICE_ACCOUNT_JSON",
+
   "mode": "dev",
 
+  "tickers": ["2330", "2317", "2882", "2881", "2454"],
+
   "sheets": {
-    "dev":   { "TW50": "TW50_test",  "Top10": "Top10_test" },
-    "prod":  { "TW50": "TW50",       "Top10": "Top10" }
-  },
-
-  "dev":   { "TW50": "TW50_test",  "Top10": "Top10_test" },
-  "prod":  { "TW50": "TW50",       "Top10": "Top10" },
-
-  "rsi_length": 14,
-  "sma_windows": [20, 50, 200],
-  "bb_length": 20,
-  "start_date": "2025-01-01",
-  "end_date":   "2025-12-31"
+    "dev":  { "tw50": "TW50_test",  "top10": "Top10_test" },
+    "prod": { "tw50": "TW50",       "top10": "Top10" }
+  }
 }
