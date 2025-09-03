@@ -1,224 +1,207 @@
-# -*- coding: utf-8 -*-
-"""
-TW50 → Google Sheet（無 pandas-ta）
-修正點：
-- 指標一律用 groupby().transform(...)，右側回傳 Series，避免
-  "Cannot set a DataFrame with multiple columns to the single column ..."。
-- 台股代號自動補 .TW
-- A1 寫入時間戳，資料從 A2 起用 gspread_dataframe.set_with_dataframe 輸出
-"""
+# ====== 這段開始可以直接貼到 src/main.py（覆蓋原本主流程與寫入）======
 
 import os
 import json
-import math
-import datetime as dt
-import numpy as np
-import pandas as pd
-import yfinance as yf
+import io
 import gspread
+from datetime import datetime, timezone, timedelta
 from gspread_dataframe import set_with_dataframe
+from google.oauth2.service_account import Credentials
+import pandas as pd
 
-# ---------- 小工具 ----------
+# ---------- 工具：讀 config 與選工作表 ----------
+def load_config(path="config.json"):
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
 
-def with_tw_suffix(tickers):
-    out = []
-    for t in tickers:
-        t = str(t).strip()
-        if not t:
-            continue
-        if not t.endswith(".TW"):
-            t += ".TW"
-        out.append(t)
-    return out
+def pick_sheet_names(cfg, mode: str):
+    """
+    cfg["sheets"] 必須像這樣：
+    {
+      "prod": {"TW50": "TW50", "Top10": "Top10"},
+      "dev":  {"TW50": "TW50_test", "Top10": "Top10_test"}
+    }
+    """
+    mode = (mode or "dev").lower()
+    tables = cfg["sheets"]["dev" if mode == "dev" else "prod"]
+    return tables["TW50"], tables["Top10"]
 
-def load_cfg():
-    # 優先讀 repo 的 config.json
-    with open("config.json", "r", encoding="utf-8") as f:
-        cfg = json.load(f)
-
-    # sheet_id 允許用 Secrets 覆蓋
-    sheet_id_env = os.getenv("SHEET_ID")
-    if sheet_id_env:
-        cfg["sheet_id"] = sheet_id_env
-
-    # mode 允許用環境變數覆蓋（dev/prod）
-    mode_env = os.getenv("MODE", "").strip().lower()
-    if mode_env in ("dev", "prod"):
-        cfg["mode"] = mode_env
+# ---------- 連線 Google Sheet ----------
+def connect_google_sheet(cfg):
+    # 支援 secrets 或明文檔（以 secrets 優先）
+    sa_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
+    if sa_json:
+        info = json.loads(sa_json)
     else:
-        cfg["mode"] = cfg.get("mode", "prod")
+        # 若你是放在 repo 內，路徑用 cfg["service_account_file"] 指到 .json
+        with open(cfg["service_account_file"], "r", encoding="utf-8") as f:
+            info = json.load(f)
 
-    # 期間
-    cfg["start_date"] = cfg.get("start_date", "2024-01-01")
-    cfg["end_date"] = cfg.get("end_date", dt.date.today().isoformat())
-
-    # 台股代號補 .TW
-    cfg["tickers"] = with_tw_suffix(cfg.get("tickers", []))
-    return cfg
-
-def rsi(series, period=14):
-    delta = series.diff()
-    up = delta.clip(lower=0)
-    down = -delta.clip(upper=0)
-
-    ma_up = up.rolling(period, min_periods=period).mean()
-    ma_down = down.rolling(period, min_periods=period).mean()
-
-    rs = ma_up / ma_down.replace(0, np.nan)
-    out = 100 - (100 / (1 + rs))
-    return out.fillna(0)
-
-def add_indicators(df):
-    # df 需包含：Ticker, Date, Open, High, Low, Close, Volume
-    df = df.sort_values(["Ticker", "Date"]).reset_index(drop=True)
-    g = df.groupby("Ticker", group_keys=False)
-
-    # 均線：用 transform → Series（與 index 對齊）
-    df["SMA_20"]  = g["Close"].transform(lambda s: s.rolling(20,  min_periods=1).mean())
-    df["SMA_50"]  = g["Close"].transform(lambda s: s.rolling(50,  min_periods=1).mean())
-    df["SMA_200"] = g["Close"].transform(lambda s: s.rolling(200, min_periods=1).mean())
-
-    # RSI 14
-    df["RSI_14"] = g["Close"].transform(lambda s: rsi(s, 14))
-
-    # 布林 20（同樣用 transform 取得 Series）
-    bb_avg = g["Close"].transform(lambda s: s.rolling(20, min_periods=20).mean())
-    bb_std = g["Close"].transform(lambda s: s.rolling(20, min_periods=20).std())
-    df["BB_20_Basis"] = bb_avg
-    df["BB_20_Upper"] = bb_avg + 2 * bb_std
-    df["BB_20_Lower"] = bb_avg - 2 * bb_std
-    df["BB_20_Width"] = (df["BB_20_Upper"] - df["BB_20_Lower"]) / df["BB_20_Basis"]
-
-    # 簡單訊號（可之後再調整邏輯）
-    df["ShortSignal"] = np.where(df["Close"] > df["BB_20_Upper"], "Buy",
-                          np.where(df["Close"] < df["BB_20_Lower"], "Sell", "Hold"))
-    df["LongTrend"] = np.where(df["SMA_50"] > df["SMA_200"], "Up",
-                        np.where(df["SMA_50"] < df["SMA_200"], "Down", "Neutral"))
-
-    # 版面友善欄位順序
-    cols = [
-        "Date","Ticker","Open","High","Low","Close","Volume",
-        "RSI_14","SMA_20","SMA_50","SMA_200",
-        "BB_20_Basis","BB_20_Upper","BB_20_Lower","BB_20_Width",
-        "ShortSignal","LongTrend"
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive",
     ]
-    existing = [c for c in cols if c in df.columns]
-    rest = [c for c in df.columns if c not in existing]
-    return df[existing + rest]
+    creds = Credentials.from_service_account_info(info, scopes=scopes)
+    gc = gspread.authorize(creds)
+    sh = gc.open_by_key(cfg["sheet_id"])
+    return sh
 
-def download_prices(tickers, start, end):
-    # yfinance 下載 multi-index → 攤平成長表
-    data = yf.download(tickers, start=start, end=end, auto_adjust=False, group_by="ticker", threads=True)
-    frames = []
-    for t in tickers:
-        if t not in data.columns.get_level_values(0):
-            # 個別 ticker 下載不到也略過
-            try:
-                d1 = yf.download(t, start=start, end=end, auto_adjust=False)
-                if d1.empty:
-                    continue
-                d1 = d1.reset_index()[["Date","Open","High","Low","Close","Volume"]]
-            except Exception:
-                continue
-        else:
-            d1 = data[t][["Open","High","Low","Close","Volume"]].reset_index()
-
-        d1["Ticker"] = t
-        frames.append(d1)
-
-    if not frames:
-        return pd.DataFrame(columns=["Date","Ticker","Open","High","Low","Close","Volume"])
-    out = pd.concat(frames, ignore_index=True)
-    # 確保日期是 date / datetime
-    if not np.issubdtype(out["Date"].dtype, np.datetime64):
-        out["Date"] = pd.to_datetime(out["Date"])
-    return out
-
-# ---------- Google Sheets ----------
-
-def connect_google_sheet():
-    # 服務金鑰：建議放在 GitHub Secret GOOGLE_SERVICE_ACCOUNT_JSON
-    svc_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
-    if not svc_json:
-        raise RuntimeError("找不到環境變數 GOOGLE_SERVICE_ACCOUNT_JSON（請放 service account JSON 內容）")
+def get_or_create_worksheet(sh, title: str):
     try:
-        creds = json.loads(svc_json)
-    except Exception as e:
-        raise RuntimeError(f"GOOGLE_SERVICE_ACCOUNT_JSON 不是合法 JSON：{e}")
-    gc = gspread.service_account_from_dict(creds)
-    return gc
+        return sh.worksheet(title)
+    except gspread.WorksheetNotFound:
+        # 建立空工作表（1000x26 只是初值，之後 set_with_dataframe 會自動調整）
+        return sh.add_worksheet(title=title, rows=1000, cols=26)
 
-def write_timestamp(ws, tz_name="Asia/Taipei"):
-    # A1 寫時間，資料從 A2 開始
-    now = dt.datetime.now(dt.timezone(dt.timedelta(hours=8))) if tz_name == "Asia/Taipei" else dt.datetime.now()
-    ws.update("A1", f"Last Update ({tz_name}): {now.strftime('%Y-%m-%d %H:%M:%S')}")
-
-def write_dataframe(ws, df):
-    # 從 A2 輸出（避免覆蓋 A1 的時間戳）
+# ---------- 寫入（安全版：不清空、不寫空） ----------
+def safe_write_dataframe(ws, df: pd.DataFrame, note_ts: bool = True):
     if df is None or df.empty:
-        # 清一下舊資料，但保留 A1
-        ws.batch_clear(["A2:Z"])
+        print(f"[WARN] DataFrame 是空的，跳過寫入：{ws.title}")
         return
-    set_with_dataframe(ws, df, row=2, col=1, include_index=False, include_column_header=True, resize=True)
+
+    # 轉成純文字/數值，避免物件型態
+    df = df.copy()
+    for c in df.columns:
+        if pd.api.types.is_datetime64_any_dtype(df[c]):
+            df[c] = df[c].dt.strftime("%Y-%m-%d")
+        elif pd.api.types.is_object_dtype(df[c]):
+            df[c] = df[c].astype(str)
+
+    # 直接覆蓋（不 clear）
+    set_with_dataframe(ws, df, include_index=False, include_column_header=True)
+
+    # 在 A1 寫 Last Update 註記
+    if note_ts:
+        tz = timezone(timedelta(hours=8))  # Asia/Taipei
+        ts = datetime.now(tz).strftime("Last Update (Asia/Taipei): %Y-%m-%d %H:%M:%S")
+        ws.update_acell("A1", ts)
+
+# ---------- Top10 建置（強韌版） ----------
+def build_top10(df_tw50: pd.DataFrame, top_n: int = 10) -> pd.DataFrame:
+    if df_tw50 is None or df_tw50.empty:
+        return pd.DataFrame()
+
+    df = df_tw50.copy()
+
+    # 正規化欄位大小寫與名稱
+    cols = {c.lower(): c for c in df.columns}
+    # 需要的欄位鍵
+    need_map = {}
+    for k in ["ticker", "date", "shortsignal", "rsi_14"]:
+        # 在 columns 中找對應（忽略大小寫）
+        cand = [c for c in df.columns if c.lower() == k]
+        if cand:
+            need_map[k] = cand[0]
+    # 至少要有 ticker 與 date
+    if "ticker" not in need_map or "date" not in need_map:
+        print("[WARN] 缺少必要欄位（Ticker/Date），回傳空 Top10。")
+        return pd.DataFrame()
+
+    # 型別一致化
+    df[need_map["ticker"]] = df[need_map["ticker"]].astype(str).str.strip()
+
+    # 取各股票最新一筆
+    # 若 Date 是字串，先嘗試 parse
+    try:
+        df["_dt_"] = pd.to_datetime(df[need_map["date"]], errors="coerce")
+    except Exception:
+        df["_dt_"] = pd.to_datetime(df[need_map["date"]].astype(str), errors="coerce")
+    df = df.dropna(subset=["_dt_"])
+    last = df.sort_values("_dt_").groupby(need_map["ticker"], as_index=False).tail(1)
+
+    # 先用 ShortSignal == 'Buy'
+    if "shortsignal" in need_map:
+        top = last[last[need_map["shortsignal"]].astype(str).str.lower() == "buy"]
+        if top.empty:
+            # 再用 RSI_14 由大到小
+            if "rsi_14" in need_map:
+                # 非數值轉 NaN
+                top = last.copy()
+                top["__rsi__"] = pd.to_numeric(top[need_map["rsi_14"]], errors="coerce")
+                top = top.sort_values("__rsi__", ascending=False).head(top_n)
+                top = top.drop(columns=["__rsi__"])
+            else:
+                # 沒有 RSI 就直接取前 N 檔
+                top = last.head(top_n)
+        else:
+            top = top.head(top_n)
+    else:
+        # 沒 ShortSignal 欄位
+        if "rsi_14" in need_map:
+            top = last.copy()
+            top["__rsi__"] = pd.to_numeric(top[need_map["rsi_14"]], errors="coerce")
+            top = top.sort_values("__rsi__", ascending=False).head(top_n)
+            top = top.drop(columns=["__rsi__"])
+        else:
+            top = last.head(top_n)
+
+    # 防呆：如果還是空，至少回傳 last 的前 N 檔，避免整張表為空
+    if top.empty:
+        print("[WARN] Top10 篩選結果為空，回傳最近一筆的前 N 檔避免空白。")
+        top = last.head(top_n)
+
+    # 選幾個常用欄位（存在才保留）
+    prefer_cols = ["Date", "Ticker", "Name", "Close", "RSI_14", "SMA_20", "SMA_50", "SMA_200",
+                   "BB_20_Lower", "BB_20_Upper", "ShortSignal", "LongTrend"]
+    final_cols = [c for c in prefer_cols if c in top.columns]
+    if not final_cols:
+        final_cols = list(top.columns)
+    top = top.loc[:, final_cols]
+    return top.reset_index(drop=True)
 
 # ---------- 主流程 ----------
-
-def pick_sheet_names(cfg):
-    env = cfg.get("mode", "prod")
-    sheets = cfg.get("sheets", {})
-    if env not in sheets:
-        raise RuntimeError(f"MODE={env} 沒有對應的 sheets 設定，請確認 config.json")
-    tw50_name = sheets[env].get("tw50")
-    top10_name = sheets[env].get("top10")
-    if not tw50_name or not top10_name:
-        raise RuntimeError("config.json 的 sheets 設定缺少 tw50 或 top10 名稱")
-    return tw50_name, top10_name
-
 def main():
-    print(f"[INFO] MODE={os.getenv('MODE', 'prod')}")
-    cfg = load_cfg()
-    print(f"[INFO] 讀到設定：MODE={cfg['mode']}，TW50={cfg['sheets'][cfg['mode']]['tw50']}，Top10={cfg['sheets'][cfg['mode']]['top10']}")
-    print(f"[INFO] 使用 tickers：{cfg['tickers'][:5]} ...（共 {len(cfg['tickers'])} 檔）")
+    mode = (os.getenv("MODE", "dev") or "dev").lower()
+    print(f"[INFO] MODE={mode}")
 
-    # 下載資料
-    prices = download_prices(cfg["tickers"], cfg["start_date"], cfg["end_date"])
-    if prices.empty:
-        raise RuntimeError("下載不到任何價格資料，請檢查 tickers / 期間或網路")
+    cfg = load_config("config.json")
+    tw_sheet_name, top_sheet_name = pick_sheet_names(cfg, mode)
+    print(f"[INFO] 對應工作表：TW50={tw_sheet_name}, Top10={top_sheet_name}")
 
-    # 計算技術指標（這裡已修成 transform → Series）
-    base = add_indicators(prices)
+    # 你前面應該已有：抓價、算指標 -> 產生 df_tw50
+    # 這裡假設你有個函式 build_tw50_dataframe(cfg) 回傳 df_tw50
+    # df_tw50 = build_tw50_dataframe(cfg)
+    # 若你目前是其他名稱，就把它改成 df_tw50
+    # ----------------------------
+    # !!! 把這行換成你實際產生 TW50 DataFrame 的變數 !!!
+    # 例如：df_tw50 = result_df
+    # ----------------------------
+    raise_if_missing = False  # 防止真的忘記替換
+    if raise_if_missing:
+        raise RuntimeError("請把 df_tw50 指向你產生的 TW50 DataFrame 變數。")
 
-    # 連線 Sheet
-    gc = connect_google_sheet()
-    sh = gc.open_by_key(cfg["sheet_id"])
-    tw50_ws_name, top10_ws_name = pick_sheet_names(cfg)
+    # ========= 示範（請用你自己的 df_tw50 替換）=========
+    # 下方只是示範空 df（避免誤清表），真實跑要改成你的實際資料
+    df_tw50 = pd.DataFrame()
+    # ================================================
 
-    # TW50 分頁：全部輸出
-    tw50_ws = sh.worksheet(tw50_ws_name)
-    write_timestamp(tw50_ws, tz_name="Asia/Taipei")
-    # 欄位順序友善化
-    out_cols = [
-        "Date","Ticker","Open","High","Low","Close","Volume",
-        "RSI_14","SMA_20","SMA_50","SMA_200",
-        "BB_20_Basis","BB_20_Upper","BB_20_Lower","BB_20_Width",
-        "ShortSignal","LongTrend"
-    ]
-    out_cols = [c for c in out_cols if c in base.columns]
-    write_dataframe(tw50_ws, base[out_cols])
+    # 印出前幾列檢查
+    print("[DEBUG] df_tw50 預覽：")
+    try:
+        print(df_tw50.head())
+    except Exception as e:
+        print(f"[DEBUG] 無法列印 head(): {e}")
 
-    # Top10 分頁：挑 10 檔（示例：RSI_14 最高前 10）
-    tmp = base.dropna(subset=["RSI_14"])
-    top10 = (
-        tmp.sort_values(["Date","RSI_14"], ascending=[True, False])
-           .groupby("Date", as_index=False)
-           .head(10)
-           .sort_values(["Date","RSI_14"], ascending=[True, False])
-    )
-    top10_ws = sh.worksheet(top10_ws_name)
-    write_timestamp(top10_ws, tz_name="Asia/Taipei")
-    write_dataframe(top10_ws, top10[out_cols])
+    # 連 Google Sheet
+    sh = connect_google_sheet(cfg)
+    ws_tw = get_or_create_worksheet(sh, tw_sheet_name)
+    ws_top = get_or_create_worksheet(sh, top_sheet_name)
 
-    print("[OK] 輸出完成")
+    # 寫 TW50（安全）
+    safe_write_dataframe(ws_tw, df_tw50, note_ts=True)
+
+    # 產生 Top10（強韌）
+    df_top10 = build_top10(df_tw50, top_n=10)
+    print("[DEBUG] df_top10 預覽：")
+    try:
+        print(df_top10.head())
+    except Exception as e:
+        print(f"[DEBUG] 無法列印 head(): {e}")
+
+    # 寫 Top10（安全）
+    safe_write_dataframe(ws_top, df_top10, note_ts=True)
 
 if __name__ == "__main__":
     main()
+
+# ====== 這段結束 ======
