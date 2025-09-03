@@ -1,4 +1,4 @@
-name: TA-to-Sheets
+name: TA-to-Sheets-Test
 
 on:
   workflow_dispatch:
@@ -17,8 +17,10 @@ jobs:
       GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
       SHEET_ID: ${{ secrets.SHEET_ID }}
     steps:
-      - name: Checkout (use selected branch)
+      - name: Checkout (test branch)
         uses: actions/checkout@v4
+        with:
+          ref: test
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -33,5 +35,5 @@ jobs:
       - name: Echo mode
         run: echo "MODE=${MODE}"
 
-      - name: Run main.py
+      - name: Run main.py (test)
         run: python src/main.py
