@@ -1,7 +1,5 @@
-gspread==5.9.0
-google-auth==2.22.0
-pandas==1.5.3
-numpy==1.23.5
-pandas-ta==0.3.14b0
-requests==2.31.0
-gspread-dataframe
+gspread==6.1.4
+google-auth==2.33.0
+yfinance==0.2.65
+pandas==2.2.2
+numpy==1.26.4
