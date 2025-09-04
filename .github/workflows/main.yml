@@ -2,9 +2,6 @@ name: TW50 Update
 
 on:
   workflow_dispatch:
-  schedule:
-    # 每天台北時間 18:30 執行
-    - cron: '30 10 * * *'   # UTC+0 10:30 = Taipei 18:30
 
 jobs:
   build:
@@ -22,15 +19,11 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install pandas yfinance gspread google-auth numpy
 
       - name: Run TW50 script
         env:
           SHEET_ID: ${{ secrets.SHEET_ID }}
           GCP_SERVICE_ACCOUNT_JSON: ${{ secrets.GCP_SERVICE_ACCOUNT_JSON }}
-          FINNHUB_TOKEN: ${{ secrets.FINNHUB_TOKEN }}
         run: |
-          echo "Has SHEET_ID? -> ${SHEET_ID:+yes}"
-          echo "Has GCP_SERVICE_ACCOUNT_JSON? -> ${GCP_SERVICE_ACCOUNT_JSON:+yes}"
-          echo "Has FINNHUB_TOKEN? -> ${FINNHUB_TOKEN:+yes}"
-          python -u src/main.py
+          python src/main.py
