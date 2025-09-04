@@ -1,28 +1,24 @@
 # -*- coding: utf-8 -*-
 """
-TW50 TOP5 — 日更腳本（Google Sheets）
-------------------------------------------------------------
-1) 下載台股（yfinance .TW）日線資料
-2) 計算技術指標：SMA20/50/200、RSI14、布林帶(20,2)
-3) 產出中文【操作建議】、【建議買入/賣出區間】
-4) 自動略過抓不到資料的代號（會列在「備註」）
-5) 寫回 Google 試算表（無分頁則自動建立）
-   - TW50_fin      ：金融股
-   - TW50_nonfin   ：非金股（含 TOP5 熱度欄位）
-   - Top5_hot20    ：依熱度排序挑前5檔（僅示意）
-------------------------------------------------------------
-環境變數（GitHub Actions -> Repository secrets）
-- SHEET_ID                ：Google Sheet 試算表ID
-- GCP_SERVICE_ACCOUNT_JSON：服務帳號的 JSON（整段貼上）
-可選：
-- FINMUB_TOKEN            ：若你之後要接別的資料源可用，現階段不需要
+TW50 自動化（V3 大改版，穩定版）
+------------------------------------------------
+✓ 統一用 google-auth + gspread（不依賴 oauth2client）
+✓ 所有技術指標都先把資料壓成一維 Series（避免 (n,1)）
+✓ 寫表前將 Timestamp / numpy 全部轉 Python 原生型別（避免 JSON 錯誤）
+✓ 只用「純量」做判斷（不對整個 Series 做 if，避免 ambiguous）
+✓ 找不到資料/API 失敗：跳過並寫入 Logs，不中斷整批
+✓ 分頁不存在會自動建立，且會覆蓋寫入（全量表頭+資料）
+✓ 可用 config.json 自訂標的（沒有就用內建 TW50 清單）
+------------------------------------------------
+需要的 Secrets：
+- SHEET_ID
+- GCP_SERVICE_ACCOUNT_JSON
+（FINMIND_TOKEN 保留未來擴充，不必填）
 """
 
-import os
-import json
-import math
-from datetime import datetime
-from typing import List, Tuple
+import os, io, json, math, time
+from datetime import datetime, timezone, timedelta
+from typing import List, Tuple, Dict, Any
 
 import numpy as np
 import pandas as pd
@@ -31,300 +27,292 @@ import yfinance as yf
 import gspread
 from google.oauth2.service_account import Credentials
 
+# ========= 參數 =========
+TZ = timezone(timedelta(hours=8))  # Asia/Taipei
+# 工作表名稱
+TAB_FIN       = "TW50_fin"
+TAB_NONFIN    = "TW50_nonfin"
+TAB_TOP10     = "Top10_nonfin"
+TAB_HOT20     = "Hot20_nonfin"
+TAB_TOP5H20   = "Top5_hot20"
+TAB_LOGS      = "Logs"
 
-# ---------- 基本設定 ----------
-# 你要維護的清單（示範：TW50 常見幾檔；實務上放完整清單即可）
-FIN_TICKERS = [
-    "2880.TW", "2881.TW", "2882.TW", "2883.TW", "2884.TW", "2885.TW",
-    "2886.TW", "2887.TW", "2888.TW", "2889.TW", "2890.TW", "2891.TW",
+# 內建 TW50 簡表（可被 config.json 覆蓋）
+DEFAULT_ALL = [
+    "2330.TW","2317.TW","2454.TW","6505.TW","2308.TW","2303.TW","2891.TW","2881.TW","2882.TW",
+    "2884.TW","2885.TW","2886.TW","2887.TW","2888.TW","2889.TW","2890.TW","2892.TW","2382.TW",
+    "2408.TW","1303.TW","1301.TW","1326.TW","1216.TW","1101.TW","1102.TW","2412.TW","2301.TW",
+    "2603.TW","2610.TW","2609.TW","3008.TW","3711.TW","2615.TW","6547.TW","1590.TW","2002.TW",
+    "2883.TW","1402.TW","9910.TW","9904.TW","8046.TW","2379.TW","2357.TW","4938.TW","3034.TW",
+    "3037.TW","3045.TW","3702.TW","8150.TW"
 ]
-NONFIN_TICKERS = [
-    "2330.TW", "2317.TW", "2454.TW", "2303.TW", "2412.TW", "2382.TW",
-    "2308.TW", "3481.TW", "3711.TW", "1326.TW", "2301.TW", "6505.TW",
-    "2882.TW", "2891.TW"  # 混入一兩檔金融也沒關係，程式不會掛
-]
+DEFAULT_FIN = [t for t in DEFAULT_ALL if t.startswith(("288", "289"))]
 
-# 若你有完整「代號->公司名稱」對照，可放在這裡（沒對照就空字串）
-NAME_MAP = {
-    "2330.TW": "台積電", "2317.TW": "鴻海", "2454.TW": "聯發科", "2303.TW": "聯電",
-    "2412.TW": "中華電", "2382.TW": "廣達", "2308.TW": "台達電", "3481.TW": "群創",
-    "3711.TW": "日月光投控", "1326.TW": "台化", "2301.TW": "光寶科", "6505.TW": "台塑",
-    "2880.TW": "華南金", "2881.TW": "富邦金", "2882.TW": "國泰金", "2883.TW": "開發金",
-    "2884.TW": "玉山金", "2885.TW": "元大金", "2886.TW": "兆豐金", "2887.TW": "台新金",
-    "2888.TW": "新光金", "2889.TW": "國票金", "2890.TW": "永豐金", "2891.TW": "中信金",
-}
+# ========= 通用工具 =========
+def now_str():
+    return datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
 
-# ---------- Google Sheets 連線 ----------
-def get_gspread_client() -> gspread.Client:
+def squeeze_1d(x) -> pd.Series:
+    """把可能是 (n,1) 的資料強制壓成一維 Series"""
+    if isinstance(x, pd.Series):
+        return x.squeeze()
+    if isinstance(x, pd.DataFrame):
+        s = x.iloc[:, 0] if x.shape[1] > 0 else pd.Series([], dtype="float64")
+        return s.squeeze()
+    return pd.Series(np.asarray(x).squeeze())
+
+def to_native(v):
+    """轉成 Google Sheets 可吃的型別"""
+    if v is None or (isinstance(v, float) and math.isnan(v)):
+        return ""
+    if isinstance(v, (pd.Timestamp, np.datetime64, datetime)):
+        return pd.to_datetime(v).strftime("%Y-%m-%d")
+    if isinstance(v, np.generic):
+        return v.item()
+    return v
+
+def df_to_values(df: pd.DataFrame) -> List[List]:
+    if df is None or df.empty:
+        return []
+    out = df.copy()
+    # 轉日期欄位
+    for c in out.columns:
+        if np.issubdtype(out[c].dtype, np.datetime64):
+            out[c] = pd.to_datetime(out[c]).dt.strftime("%Y-%m-%d")
+    out = out.applymap(to_native)
+    return [out.columns.tolist()] + out.values.tolist()
+
+# ========= Google Sheets =========
+def gs_client() -> gspread.Client:
     raw = os.environ.get("GCP_SERVICE_ACCOUNT_JSON", "").strip()
     if not raw:
-        raise RuntimeError("缺少 GCP_SERVICE_ACCOUNT_JSON Secret")
-    try:
-        info = json.loads(raw)
-    except Exception as e:
-        raise RuntimeError(f"GCP_SERVICE_ACCOUNT_JSON 不是有效 JSON: {e}")
-
-    scopes = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive",
-    ]
+        raise RuntimeError("缺少 GCP_SERVICE_ACCOUNT_JSON")
+    info = json.loads(raw)
+    scopes = ["https://www.googleapis.com/auth/spreadsheets",
+              "https://www.googleapis.com/auth/drive"]
     creds = Credentials.from_service_account_info(info, scopes=scopes)
     return gspread.authorize(creds)
 
+def open_sheet():
+    sid = os.environ.get("SHEET_ID", "").strip()
+    if not sid:
+        raise RuntimeError("缺少 SHEET_ID")
+    return gs_client().open_by_key(sid)
 
-def open_sheet() -> gspread.Spreadsheet:
-    sheet_id = os.environ.get("SHEET_ID", "").strip()
-    if not sheet_id:
-        raise RuntimeError("缺少 SHEET_ID Secret")
-    gc = get_gspread_client()
-    return gc.open_by_key(sheet_id)
-
-
-def get_or_create_worksheet(ss: gspread.Spreadsheet, title: str) -> gspread.Worksheet:
+def ensure_ws(sh: gspread.Spreadsheet, title: str, rows=1000, cols=40):
     try:
-        return ss.worksheet(title)
+        return sh.worksheet(title)
     except gspread.WorksheetNotFound:
-        return ss.add_worksheet(title=title, rows=5, cols=5)
+        return sh.add_worksheet(title=title, rows=rows, cols=cols)
 
-
-def upsert_df(ss: gspread.Spreadsheet, ws_title: str, df: pd.DataFrame):
-    """將 df 寫入指定分頁（覆蓋）。處理 Timestamp、NaN → 可寫入 JSON。"""
-    ws = get_or_create_worksheet(ss, ws_title)
-
-    # 先把所有日期型別轉字串，NaN 轉空字串
-    safe = df.copy()
-
-    # 保險：把 index 轉成欄位（若你不想要可拿掉）
-    safe.reset_index(drop=True, inplace=True)
-
-    # 將所有 datetime64/Timestamp 轉文字
-    for col in safe.columns:
-        if np.issubdtype(safe[col].dtype, np.datetime64):
-            safe[col] = safe[col].astype(str)
-
-    # 其他非純 Python 標量統一轉成可序列化
-    def _to_py(x):
-        if pd.isna(x):
-            return ""
-        if isinstance(x, (np.integer, )):
-            return int(x)
-        if isinstance(x, (np.floating, )):
-            # 保留小數，四捨五入到 6 位（避免太長）
-            return float(round(x, 6))
-        if isinstance(x, (np.bool_, )):
-            return bool(x)
-        # Timestamp / datetime 已前面轉掉；其餘轉字串
-        return x
-
-    safe = safe.applymap(_to_py)
-
-    values = [list(safe.columns)] + safe.values.tolist()
+def write_df(sh, title: str, df: pd.DataFrame, stamp=True):
+    ws = ensure_ws(sh, title, rows=max(1000, len(df) + 10), cols=max(40, len(df.columns) + 2))
     ws.clear()
-    ws.update("A1", values, value_input_option="RAW")
-
-
-# ---------- 技術指標 ----------
-def rsi(series: pd.Series, period: int = 14) -> pd.Series:
-    delta = series.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(period).mean()
-    rs = gain / loss
-    return 100 - (100 / (1 + rs))
-
-
-def indicators(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    安全版技術指標：
-    - 強制把 Close 壓成 1 維 Series（避免變成 (n,1) DataFrame）
-    - 所有中間計算都 .astype(float).squeeze()，確保是可寫入的 1 維
-    """
-    out = df.copy()
-
-    # —— 取 Close，無論是 Series 或 (n,1) DataFrame 都壓成一維 Series ——
-    close_col = out["Close"]
-    if isinstance(close_col, pd.DataFrame):
-        close = close_col.iloc[:, 0].squeeze()
+    values = df_to_values(df)
+    if stamp:
+        ws.update("A1", [[f"Last Update (Asia/Taipei): {now_str()}"]], value_input_option="RAW")
+        start = "A3"
     else:
-        close = pd.Series(close_col).squeeze()
+        start = "A1"
+    if values:
+        ws.update(start, values, value_input_option="RAW")
 
-    close = pd.to_numeric(close, errors="coerce")  # 保險：轉數值
+# ========= 設定（config.json 可選） =========
+def load_config():
+    cfg = {}
+    try:
+        with io.open("config.json", "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+    except Exception:
+        pass
+    all_list = cfg.get("all", DEFAULT_ALL)
+    fin_list = cfg.get("fin", DEFAULT_FIN)
+    nonfin_list = [t for t in all_list if t not in set(fin_list)]
+    return all_list, fin_list, nonfin_list
 
-    # —— 移動均線 ——
-    sma20  = close.rolling(20).mean()
-    sma50  = close.rolling(50).mean()
-    sma200 = close.rolling(200).mean()
+# ========= 指標 =========
+def rsi_ewm(close: pd.Series, period=14) -> pd.Series:
+    c = squeeze_1d(close).astype(float)
+    delta = c.diff()
+    gain = delta.clip(lower=0.0)
+    loss = -delta.clip(upper=0.0)
+    up = gain.ewm(alpha=1/period, adjust=False).mean()
+    dn = loss.ewm(alpha=1/period, adjust=False).mean()
+    rs = up / (dn.replace(0, np.nan))
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
 
-    out["SMA20"]  = sma20.astype(float)
-    out["SMA50"]  = sma50.astype(float)
-    out["SMA200"] = sma200.astype(float)
-
-    # —— RSI14 ——
-    delta = close.diff()
-    gain = delta.where(delta > 0, 0).rolling(14).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
-    rs = gain / loss
-    out["RSI14"] = (100 - (100 / (1 + rs))).astype(float)
-
-    # —— 布林帶（用 SMA20 作為中軌）——
-    mid = out["SMA20"].astype(float).squeeze()
-    std = close.rolling(20).std().astype(float).squeeze()
-
-    bb_upper = (mid + 2 * std).astype(float)
-    bb_lower = (mid - 2 * std).astype(float)
-
-    # 寫回單欄位（保證是一維）
+def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    close = squeeze_1d(out["Close"]).astype(float)
+    out["SMA20"]  = close.rolling(20, min_periods=1).mean()
+    out["SMA50"]  = close.rolling(50, min_periods=1).mean()
+    out["SMA200"] = close.rolling(200, min_periods=1).mean()
+    out["RSI14"]  = rsi_ewm(close, 14)
+    mid = out["SMA20"]
+    std = close.rolling(20, min_periods=1).std(ddof=0)
     out["BB_Mid"]   = mid
-    out["BB_Upper"] = bb_upper
-    out["BB_Lower"] = bb_lower
-
+    out["BB_Upper"] = mid + 2 * std
+    out["BB_Lower"] = mid - 2 * std
     return out
 
+# ========= 建議（純量判斷版） =========
+def decide(row: pd.Series) -> Dict[str, Any]:
+    def S(key, default=np.nan):
+        try:
+            v = row.get(key, default)
+            return float(v) if v is not None and v != "" else default
+        except Exception:
+            return default
 
-def make_advice(last_row: pd.Series) -> Tuple[str, str, str]:
-    """
-    回傳 (操作建議, 建議買入區間, 建議賣出區間)
-    """
-    c = last_row["Close"]
-    sma20 = last_row["SMA20"]
-    sma50 = last_row["SMA50"]
-    sma200 = last_row["SMA200"]
-    r = last_row["RSI14"]
-    u = last_row["BB_Upper"]
-    l = last_row["BB_Lower"]
-    mid = last_row["BB_Mid"]
+    c = S("Close"); sma20 = S("SMA20"); sma50 = S("SMA50"); sma200 = S("SMA200")
+    rsi = S("RSI14"); u = S("BB_Upper"); l = S("BB_Lower"); m = S("BB_Mid")
 
-    trend = "多頭" if (sma20 > sma50 > sma200) else ("空頭" if (sma20 < sma50 < sma200) else "盤整")
-    rsi_zone = "超買" if r >= 70 else ("超賣" if r <= 30 else "中性")
+    if any(map(lambda x: (x is np.nan) or (x != x), [c, sma20, sma50, sma200, rsi, u, l, m])):
+        return {"多空": "未知", "建議": "資料不足", "進場": "", "出場": "", "信心": 0}
 
-    # 操作建議（偏保守）
+    # 結構
+    if sma20 > sma50 > sma200 and c > sma20:
+        trend = "多頭"
+    elif sma20 < sma50 < sma200 and c < sma20:
+        trend = "空頭"
+    else:
+        trend = "盤整"
+
+    # 建議（保守）
     if trend == "多頭":
-        if (c <= mid) and (rsi_zone != "超買"):
-            advice = "偏多觀察→回到中軌附近分批佈局；若跌破下軌需嚴設停損"
-        elif c >= u or rsi_zone == "超買":
-            advice = "多頭高檔→採分批減碼/不追高，回測5%~8%再看"
-        else:
-            advice = "多頭延續→續抱為主，等待量縮回檔再加碼"
+        advice = "偏多→回到中軌/20MA 附近可分批；跌破下軌停損"
+        entry  = f"靠近中軌≈{m:.2f}（±1%）"
+        exit_  = f"跌破下軌≈{l:.2f} 或日收跌破20MA≈{sma20:.2f}"
     elif trend == "空頭":
-        if (c < mid) and (rsi_zone != "超賣"):
-            advice = "偏空觀察→反彈至中軌/上軌附近逢高減碼"
-        elif rsi_zone == "超賣":
-            advice = "空頭超賣→僅短線反彈思維，嚴格停損"
-        else:
-            advice = "空頭延續→保守，等待底部訊號"
+        advice = "偏空→反彈至中軌附近逢高減碼；站回20MA觀望"
+        entry  = f"反彈至中軌≈{m:.2f}"
+        exit_  = f"突破上軌≈{u:.2f} 或站回20MA≈{sma20:.2f}"
     else:
-        advice = "盤整→區間高出低進，先以短打為主"
+        advice = "盤整→區間思維；下緣偏多、上緣偏賣"
+        entry  = f"靠近下緣≈{l:.2f}"
+        exit_  = f"靠近上緣≈{u:.2f}"
 
-    # 區間：用布林帶 & RSI 給一個參考
-    buy_lo  = round(float(max(l, mid * 0.97)), 3) if not math.isnan(l) and not math.isnan(mid) else ""
-    buy_hi  = round(float(mid), 3) if not math.isnan(mid) else ""
-    sell_lo = round(float(mid), 3) if not math.isnan(mid) else ""
-    sell_hi = round(float(min(u, mid * 1.03)), 3) if not math.isnan(u) and not math.isnan(mid) else ""
+    # 信心（簡易 0~100）
+    score = 50
+    score += 10 if trend == "多頭" else (-10 if trend == "空頭" else 0)
+    score += min(15, max(0, (abs(rsi - 50) / 50) * 15))
+    score = int(max(0, min(100, round(score))))
 
-    buy_rng  = f"{buy_lo} ~ {buy_hi}"  if buy_lo != "" and buy_hi != "" else ""
-    sell_rng = f"{sell_lo} ~ {sell_hi}" if sell_lo != "" and sell_hi != "" else ""
+    return {"多空": trend, "建議": advice, "進場": entry, "出場": exit_, "信心": score}
 
-    return advice, buy_rng, sell_rng
-
-
-# ---------- 下載＆彙整 ----------
-def fetch_one(ticker: str, period: str = "1y") -> Tuple[pd.DataFrame, str]:
-    """回傳(含指標的DF, 備註)。抓不到就備註說明並回空DF。"""
+# ========= 下載與彙整 =========
+def fetch(ticker: str) -> Tuple[pd.DataFrame, str, str]:
+    """回： (只取最後一列指標表, 公司名, 失敗訊息)"""
     try:
-        df = yf.download(ticker, period=period, interval="1d", auto_adjust=True, progress=False)
+        hist = yf.download(ticker, period="400d", interval="1d", auto_adjust=True, progress=False)
     except Exception as e:
-        return pd.DataFrame(), f"{ticker} 下載錯誤: {e}"
+        return pd.DataFrame(), "", f"{ticker} 下載錯誤: {e}"
 
-    if df is None or df.empty:
-        return pd.DataFrame(), f"{ticker} 無資料，已跳過"
+    if hist is None or hist.empty:
+        return pd.DataFrame(), "", f"{ticker} 無資料"
 
-    df = df.reset_index()  # 把 Date 變成欄位
-    df = indicators(df)
+    hist = hist.rename_axis("Date").reset_index()
+    hist = hist[["Date","Open","High","Low","Close","Volume"]]
+    hist = add_indicators(hist)
+    last = hist.iloc[-1].copy()
 
-    # 取最後一筆做文字建議
-    last = df.iloc[-1]
-    advice, buy_rng, sell_rng = make_advice(last)
+    # 名稱（取不到就空白）
+    name = ""
+    try:
+        info = yf.Ticker(ticker).info
+        name = info.get("shortName") or ""
+    except Exception:
+        name = ""
 
-    # 組欄位（你要顯示在表上的）
-    out = pd.DataFrame([{
-        "資料時戳 (Asia/Taipei)": pd.Timestamp(datetime.now()).strftime("%Y-%m-%d %H:%M:%S"),
-        "代號": ticker,
-        "公司名稱": NAME_MAP.get(ticker, ""),
-        "Date": last["Date"],  # 後面會統一轉字串
-        "Open":  last["Open"],
-        "High":  last["High"],
-        "Low":   last["Low"],
-        "Close": last["Close"],
-        "Volume": int(last.get("Volume", 0)) if not pd.isna(last.get("Volume", np.nan)) else "",
-        "RSI14":  last["RSI14"],
-        "SMA20":  last["SMA20"],
-        "SMA50":  last["SMA50"],
-        "SMA200": last["SMA200"],
-        "BB_Mid":   last["BB_Mid"],
-        "BB_Upper": last["BB_Upper"],
-        "BB_Lower": last["BB_Lower"],
-        "操作建議": advice,
-        "建議買入區間": buy_rng,
-        "建議賣出區間": sell_rng,
-        "備註": "",  # 下載成功就空白
-    }])
+    dec = decide(last)
 
-    return out, ""
+    row = {
+        "資料時戳(Asia/Taipei)": now_str(),
+        "Date": last["Date"],
+        "Ticker": ticker,
+        "公司名稱": name,
+        "Open": last["Open"], "High": last["High"], "Low": last["Low"], "Close": last["Close"],
+        "Volume": last.get("Volume", ""),
+        "RSI14": last["RSI14"], "SMA20": last["SMA20"], "SMA50": last["SMA50"], "SMA200": last["SMA200"],
+        "BB_Mid": last["BB_Mid"], "BB_Upper": last["BB_Upper"], "BB_Lower": last["BB_Lower"],
+        "多空趨勢": dec["多空"], "操作建議": dec["建議"], "建議進場": dec["進場"], "建議出場": dec["出場"], "信心分數": dec["信心"]
+    }
+    return pd.DataFrame([row]), name, ""
 
-
-def assemble_rows(tickers: List[str]) -> Tuple[pd.DataFrame, List[str]]:
-    all_rows = []
-    notes = []
+def aggregate(tickers: List[str]) -> Tuple[pd.DataFrame, List[str]]:
+    rows = []; errs = []
     for t in tickers:
-        df1, note = fetch_one(t)
+        df1, _, err = fetch(t)
         if not df1.empty:
-            all_rows.append(df1)
-        if note:
-            notes.append(note)
-    if all_rows:
-        return pd.concat(all_rows, ignore_index=True), notes
+            rows.append(df1)
+        if err:
+            errs.append(err)
+        time.sleep(0.25)  # 禮貌節流
+    if rows:
+        out = pd.concat(rows, ignore_index=True)
+        # 排序：Ticker
+        out = out.sort_values(["Ticker"]).reset_index(drop=True)
     else:
-        # 確保回傳空DF時也有欄位，不然寫表會報錯
-        cols = ["資料時戳 (Asia/Taipei)","代號","公司名稱","Date","Open","High","Low",
-                "Close","Volume","RSI14","SMA20","SMA50","SMA200",
-                "BB_Mid","BB_Upper","BB_Lower","操作建議","建議買入區間","建議賣出區間","備註"]
-        return pd.DataFrame(columns=cols), notes
+        out = pd.DataFrame(columns=[
+            "資料時戳(Asia/Taipei)","Date","Ticker","公司名稱","Open","High","Low","Close","Volume",
+            "RSI14","SMA20","SMA50","SMA200","BB_Mid","BB_Upper","BB_Lower",
+            "多空趨勢","操作建議","建議進場","建議出場","信心分數"
+        ])
+    return out, errs
 
+def top10_by_volume(df_nonfin: pd.DataFrame) -> pd.DataFrame:
+    if df_nonfin.empty: return df_nonfin
+    return df_nonfin.sort_values("Volume", ascending=False).head(10).reset_index(drop=True)
 
-# ---------- 主流程 ----------
+def hot20_score(df_nonfin: pd.DataFrame) -> pd.DataFrame:
+    if df_nonfin.empty: return df_nonfin
+    d = df_nonfin.copy()
+    # 距離中軌%、波動%、量標準化
+    d["距離中軌%"] = ((d["Close"] - d["BB_Mid"]) / d["BB_Mid"]).abs() * 100
+    d["波動%"] = ((d["BB_Upper"] - d["BB_Lower"]) / d["BB_Mid"]).abs() * 100
+    def z(x):
+        x = pd.to_numeric(x, errors="coerce")
+        mu, sd = x.mean(skipna=True), x.std(skipna=True)
+        if sd and not math.isnan(sd) and sd != 0:
+            return (x - mu) / sd
+        return x * 0
+    d["z_vol"]  = z(d["Volume"])
+    d["z_dist"] = z(d["距離中軌%"])
+    d["z_vola"] = z(d["波動%"])
+    d["熱度分數"] = d[["z_vol","z_dist","z_vola"]].sum(axis=1)
+    d = d.sort_values(["熱度分數","Volume"], ascending=[False, False]).reset_index(drop=True)
+    return d.head(20)
+
+# ========= 主流程 =========
 def main():
-    print(f"[INFO] TW50 TOP5 更新")
+    print("[INFO] 啟動 TW50 V3")
 
-    ss = open_sheet()
+    sh = open_sheet()
+    all_list, fin_list, nonfin_list = load_config()
 
-    # 金融 / 非金 各自彙整
-    df_fin, notes_fin = assemble_rows(FIN_TICKERS)
-    df_non, notes_non = assemble_rows(NONFIN_TICKERS)
+    # 全表（取最後一列）
+    fin_df, fin_errs     = aggregate(fin_list)
+    nonfin_df, nonf_errs = aggregate(nonfin_list)
 
-    # 寫入前：把所有日期欄位轉字串，避免 JSON serialization 問題
-    for df in (df_fin, df_non):
-        if "Date" in df.columns:
-            df["Date"] = pd.to_datetime(df["Date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    # 衍生表
+    top10 = top10_by_volume(nonfin_df)
+    hot20 = hot20_score(nonfin_df)
+    top5  = hot20.head(5).reset_index(drop=True) if not hot20.empty else hot20
 
-    # 依照你的分頁規劃寫回
-    upsert_df(ss, "TW50_fin", df_fin)
-    upsert_df(ss, "TW50_nonfin", df_non)
+    # 寫入
+    write_df(sh, TAB_FIN,    fin_df)
+    write_df(sh, TAB_NONFIN, nonfin_df)
+    write_df(sh, TAB_TOP10,  top10)
+    write_df(sh, TAB_HOT20,  hot20)
+    write_df(sh, TAB_TOP5H20, top5)
 
-    # 產生 Top5_hot20（示意：用「距離中軌%」當熱度指標，越接近下軌排序更前）
-    # 你可以換成你喜歡的打分方式
-    if not df_non.empty:
-        tmp = df_non.copy()
-        with np.errstate(divide="ignore", invalid="ignore"):
-            tmp["距離中軌%"] = (tmp["Close"] - tmp["BB_Mid"]) / tmp["BB_Mid"] * 100
-        tmp = tmp.sort_values("距離中軌%", ascending=True).head(5).reset_index(drop=True)
-        upsert_df(ss, "Top5_hot20", tmp)
+    # Logs
+    logs = fin_errs + nonf_errs
+    logs_df = pd.DataFrame({"Time(Asia/Taipei)": [now_str()]*len(logs), "Message": logs}) if logs else pd.DataFrame({"Time(Asia/Taipei)": [now_str()], "Message": ["本次全部成功"]})
+    write_df(sh, TAB_LOGS, logs_df, stamp=False)
 
-    # 把「抓不到資料」的代號記到一張備註表（可選）
-    all_notes = notes_fin + notes_non
-    note_df = pd.DataFrame({"備註": all_notes}) if all_notes else pd.DataFrame({"備註": ["（本次全部成功）"]})
-    upsert_df(ss, "交接本", note_df)
-
-    print("[OK] 完成！")
-
+    print("[OK] 完成 ✅")
 
 if __name__ == "__main__":
     main()
