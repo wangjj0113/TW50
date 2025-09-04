@@ -1,32 +1,29 @@
-name: TW50 Auto Update
+name: TW50 Update
 
 on:
-  schedule:
-    # 台灣時間 08:30 與 20:30 (換算成 UTC: -8 小時)
-    - cron: "30 0 * * *"   # UTC 00:30 = 台北 08:30
-    - cron: "30 12 * * *"  # UTC 12:30 = 台北 20:30
-  workflow_dispatch:       # 允許手動觸發
+  workflow_dispatch:    # 手動觸發
+  schedule:             # 自動排程（台北 08:30、20:30）
+    - cron: "30 0 * * *"   # UTC 00:30 = TPE 08:30
+    - cron: "30 12 * * *"  # UTC 12:30 = TPE 20:30
 
 jobs:
   update-tw50:
     runs-on: ubuntu-latest
-
+    concurrency:
+      group: tw50-update
+      cancel-in-progress: true
     env:
       GCP_SERVICE_ACCOUNT_JSON: ${{ secrets.GCP_SERVICE_ACCOUNT_JSON }}
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
       - name: Install dependencies
         run: |
           pip install --upgrade pip
           pip install -r requirements.txt
-
       - name: Run TW50 script
         run: python src/main.py
