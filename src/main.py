@@ -1,25 +1,20 @@
 # -*- coding: utf-8 -*-
 """
-TW50-TOP5 main.py  (yfinance + TWSE備援)
-版本：v2025.09.04-Top5-zh-5
+TW50 TOP5 — yfinance + TWSE 備援
+版本：v2025-09-04
 
-Secrets（對應 workflow）：
+Secrets（GitHub Actions）需設定：
   - SHEET_ID
   - GCP_SERVICE_ACCOUNT_JSON
 
 輸出分頁：
   - TW50_fin / TW50_nonfin / Top10_nonfin / Hot20_nonfin / Top5_hot20
-
 Top5_hot20 欄位：
   股票代號、公司名稱、Date、收盤價、RSI14、訊號（買進/賣出/觀望）、
   建議進場下界/上界、建議出場下界/上界、Open/High/Low/Volume/SMA20/SMA50/SMA200/BB_*
-
-流程：
-  先用 yfinance；若抓不到，改用 TWSE 開放介面整合近12個月日線再計算指標。
-  任一代號失敗即跳過，log 會列出「已跳過清單」。
 """
 
-import os, json, time, math
+import os, json, time
 import numpy as np
 import pandas as pd
 import requests
@@ -27,7 +22,7 @@ import yfinance as yf
 import gspread
 from gspread_dataframe import set_with_dataframe
 
-# ===== 代號 ↔ 公司名稱（可擴充）=====
+# ====== 代號 ↔ 公司名稱（可擴充）======
 TICKER_NAME_MAP = {
     "2330.TW":"台積電","2317.TW":"鴻海","2454.TW":"聯發科","2303.TW":"聯電","2308.TW":"台達電",
     "2379.TW":"瑞昱","2382.TW":"廣達","2395.TW":"研華","2408.TW":"南亞科","2412.TW":"中華電",
@@ -36,16 +31,14 @@ TICKER_NAME_MAP = {
     "1101.TW":"台泥","1102.TW":"亞泥","2002.TW":"中鋼","4904.TW":"遠傳","3481.TW":"群創",
     # 金融
     "2880.TW":"華南金","2881.TW":"富邦金","2882.TW":"國泰金","2883.TW":"開發金","2884.TW":"玉山金",
-    "2885.TW":"元大金","2886.TW":"兆豐金","2887.TW":"台新金","2888.TW":"新光金","2889.TW":"國票金",  # 修正
+    "2885.TW":"元大金","2886.TW":"兆豐金","2887.TW":"台新金","2888.TW":"新光金","2889.TW":"國票金",
     "2890.TW":"永豐金","2891.TW":"中信金","2892.TW":"第一金","2897.TW":"王道銀行","2898.TW":"安泰銀",
     "5871.TW":"中租-KY","5876.TW":"上海商銀"
 }
-
-# 金融股集合（28xx + 其他金融）
 FIN_TICKERS = {t for t in TICKER_NAME_MAP if t.startswith("28")}
 FIN_TICKERS.update({"5871.TW","5876.TW"})
 
-# ===== 小工具 =====
+# ====== 小工具 ======
 def taipei_now_str():
     return pd.Timestamp.now(tz="Asia/Taipei").strftime("%Y-%m-%d %H:%M")
 
@@ -56,11 +49,11 @@ def get_gspread_client():
     return gspread.service_account_from_dict(json.loads(js))
 
 def get_sheet():
-    sheet_id = os.environ.get("SHEET_ID", "")
-    if not sheet_id:
+    sid = os.environ.get("SHEET_ID", "")
+    if not sid:
         raise RuntimeError("缺少 SHEET_ID Secret")
-    print("[INFO] SHEET_ID:", sheet_id)
-    return get_gspread_client().open_by_key(sheet_id)
+    print("[INFO] SHEET_ID:", sid)
+    return get_gspread_client().open_by_key(sid)
 
 def get_or_create(sh, title, rows=2000, cols=30):
     for ws in sh.worksheets():
@@ -75,20 +68,17 @@ def upsert_df(ws, df, stamp_text):
         return
     set_with_dataframe(ws, df, row=2, include_index=False, include_column_header=True)
 
-# ===== 指標計算 =====
+# ====== 指標 ======
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df = df.sort_index().copy()
-    # 均線
     df["SMA20"]  = df["Close"].rolling(20, min_periods=20).mean()
     df["SMA50"]  = df["Close"].rolling(50, min_periods=50).mean()
     df["SMA200"] = df["Close"].rolling(200, min_periods=200).mean()
-    # RSI14
     delta = df["Close"].diff()
     gain = delta.clip(lower=0).rolling(14, min_periods=14).mean()
     loss = (-delta.clip(upper=0)).rolling(14, min_periods=14).mean()
     rs = gain / loss.replace(0, np.nan)
     df["RSI14"] = 100 - (100 / (1 + rs))
-    # 布林
     mid = df["Close"].rolling(20, min_periods=20).mean()
     std = df["Close"].rolling(20, min_periods=20).std()
     df["BB_Mid"]   = mid
@@ -96,36 +86,30 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["BB_Lower"] = mid - 2 * std
     return df
 
-# ===== yfinance 主抓 =====
+# ====== yfinance 主要來源 ======
 def fetch_yf_history(ticker: str, period="12mo", interval="1d") -> pd.DataFrame | None:
     df = yf.download(ticker, period=period, interval=interval, auto_adjust=False, progress=False)
     if df is None or df.empty:
         return None
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = [c[0] for c in df.columns]
-    df = df[["Open","High","Low","Close","Volume"]].copy()
-    return df
+    return df[["Open","High","Low","Close","Volume"]].copy()
 
-# ===== TWSE 備援（免費介面；月檔合併）=====
-# 介面： https://www.twse.com.tw/exchangeReport/STOCK_DAY?response=json&date=YYYYMMDD&stockNo=2330
+# ====== TWSE 備援（免費，月檔整併）======
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-
 def _twse_month_df(stock_no: str, yyyymmdd: str) -> pd.DataFrame:
     url = "https://www.twse.com.tw/exchangeReport/STOCK_DAY"
     params = {"response":"json","date":yyyymmdd,"stockNo":stock_no}
     r = requests.get(url, params=params, headers=HEADERS, timeout=12)
     r.raise_for_status()
     js = r.json()
-    if js.get("stat") != "OK" or "data" not in js:
-        return pd.DataFrame()
-    cols = js["fields"]  # ['日期','成交股數','成交金額','開盤價','最高價','最低價','收盤價','漲跌價差','成交筆數']
+    if js.get("stat") != "OK" or "data" not in js: return pd.DataFrame()
+    cols = js["fields"]
     df = pd.DataFrame(js["data"], columns=cols)
-    # 清洗
+    # 轉數字
     def _num(x):
-        try:
-            return float(str(x).replace(",","").replace("--",""))
-        except:
-            return np.nan
+        try: return float(str(x).replace(",","").replace("--",""))
+        except: return np.nan
     df = df.rename(columns={
         "日期":"Date","開盤價":"Open","最高價":"High","最低價":"Low","收盤價":"Close","成交股數":"Volume"
     })
@@ -133,58 +117,43 @@ def _twse_month_df(stock_no: str, yyyymmdd: str) -> pd.DataFrame:
     for c in ["Open","High","Low","Close","Volume"]:
         df[c] = df[c].apply(_num)
     df = df[["Date","Open","High","Low","Close","Volume"]].dropna(subset=["Close"])
-    df = df.set_index("Date").sort_index()
-    return df
+    return df.set_index("Date").sort_index()
 
 def fetch_twse_history(ticker: str, months: int = 12) -> pd.DataFrame | None:
-    # '2330.TW' -> '2330'
     stock_no = ticker.split(".")[0]
-    today = pd.Timestamp.now(tz="Asia/Taipei").to_pydatetime()
+    todays = pd.Timestamp.now(tz="Asia/Taipei")
     dfs = []
     for m in range(months):
-        dt = (pd.Timestamp(today) - pd.DateOffset(months=m))
+        dt = todays - pd.DateOffset(months=m)
         yyyymmdd = f"{dt.year}{dt.month:02d}01"
         try:
             dfm = _twse_month_df(stock_no, yyyymmdd)
-            if not dfm.empty:
-                dfs.append(dfm)
-        except Exception as e:
-            # 退避後重試一次
-            time.sleep(0.8)
-            try:
-                dfm = _twse_month_df(stock_no, yyyymmdd)
-                if not dfm.empty:
-                    dfs.append(dfm)
-            except:
-                pass
-        time.sleep(0.35)  # 節流
-    if not dfs:
-        return None
+            if not dfm.empty: dfs.append(dfm)
+        except: pass
+        time.sleep(0.35)   # 節流
+    if not dfs: return None
     df = pd.concat(dfs).sort_index()
-    # 有些月份重複天數，去重
     df = df[~df.index.duplicated(keep="last")]
-    return df[["Open","High","Low","Close","Volume"]].copy()
+    return df[["Open","High","Low","Close","Volume"]]
 
 def fetch_history_with_fallback(ticker: str) -> pd.DataFrame | None:
-    # 先 yfinance → 失敗再 TWSE
     df = fetch_yf_history(ticker)
     if df is not None and not df.empty:
         return df
-    print(f"[INFO] yfinance 無資料，改用 TWSE 備援：{ticker}")
+    print(f"[INFO] yfinance 無資料 → 改用 TWSE：{ticker}")
     return fetch_twse_history(ticker, months=12)
 
-# ===== 主流程 =====
+# ====== 主流程 ======
 def main():
-    print("== TW50 vTop5 zh (yfinance + TWSE fallback) ==")
+    print("== TW50 TOP5（yfinance + TWSE fallback）==")
     sh = get_sheet()
     stamp = taipei_now_str()
 
-    # 讀取清單（優先 config.json 的 tickers，否則用 TICKER_NAME_MAP keys）
+    # 清單：優先讀 config.json 的 "tickers"/"TW50"，否則用內建 map keys
     tickers = []
-    cfg_path = "config.json"
-    if os.path.exists(cfg_path):
+    if os.path.exists("config.json"):
         try:
-            with open(cfg_path, "r", encoding="utf-8") as f:
+            with open("config.json","r",encoding="utf-8") as f:
                 cfg = json.load(f)
                 tickers = cfg.get("tickers") or cfg.get("TW50") or []
         except Exception as e:
@@ -196,7 +165,7 @@ def main():
     for t in tickers:
         hist = fetch_history_with_fallback(t)
         if hist is None or hist.empty:
-            print(f"[WARN] {t} 無法取得歷史資料，已跳過")
+            print(f"[WARN] {t} 查無日線資料，已跳過")
             failed.append(t)
             continue
         df = add_indicators(hist)
@@ -211,28 +180,27 @@ def main():
 
     df_all = pd.concat(rows, ignore_index=True)
 
-    # 分金融 / 非金融
+    # 金融 / 非金融
     is_fin = df_all["股票代號"].isin(FIN_TICKERS) | df_all["股票代號"].str.startswith("28")
     df_fin    = df_all[is_fin].copy()
     df_nonfin = df_all[~is_fin].copy()
 
-    # 全量表欄位
+    # 全量欄位
     base_cols = ["股票代號","公司名稱","Date","Open","High","Low","Close","Volume",
                  "RSI14","SMA20","SMA50","SMA200","BB_Lower","BB_Mid","BB_Upper"]
     base_cols = [c for c in base_cols if c in df_all.columns]
     df_fin_all    = df_fin[base_cols].copy()
     df_nonfin_all = df_nonfin[base_cols].copy()
 
-    # Top10（非金融，依 RSI、Volume）
+    # Top10（非金）：RSI、Volume 由高到低
     top10 = df_nonfin.sort_values(["RSI14","Volume"], ascending=[False, False]).head(10).copy()
 
-    # Hot20（非金融，依成交量）
+    # Hot20（非金）：成交量最高 20
     hot20 = df_nonfin.sort_values("Volume", ascending=False).head(20).copy()
 
-    # Top5 from Hot20（加訊號＋進出場區間；中文欄位）
+    # Top5 from Hot20 + 訊號 + 區間
     top5 = hot20.sort_values(["RSI14","Volume"], ascending=[False, False]).head(5).copy()
 
-    # 訊號（保守版：RSI + 布林）
     def signal(row):
         if pd.notna(row["RSI14"]) and pd.notna(row["BB_Lower"]) and row["RSI14"] < 40 and row["Close"] <= row["BB_Lower"]:
             return "買進"
@@ -240,21 +208,17 @@ def main():
             return "賣出"
         return "觀望"
     top5["訊號"] = top5.apply(signal, axis=1)
-
-    # 進/出場區間（布林下~中 / 中~上）
     top5["建議進場下界"] = top5["BB_Lower"]
     top5["建議進場上界"] = top5["BB_Mid"]
     top5["建議出場下界"] = top5["BB_Mid"]
     top5["建議出場上界"] = top5["BB_Upper"]
 
-    # Top5 欄位中文順序
     top5_cols = ["股票代號","公司名稱","Date","Close","RSI14","訊號",
                  "建議進場下界","建議進場上界","建議出場下界","建議出場上界",
                  "Open","High","Low","Volume","SMA20","SMA50","SMA200","BB_Lower","BB_Mid","BB_Upper"]
-    top5_cols = [c for c in top5_cols if c in top5.columns]
-    top5_out = top5[top5_cols].rename(columns={"Close":"收盤價"}).copy()
+    top5_out = top5[[c for c in top5_cols if c in top5.columns]].rename(columns={"Close":"收盤價"})
 
-    # === 寫入各分頁 ===
+    # 寫入各分頁
     for title, data in [
         ("TW50_fin",    df_fin_all),
         ("TW50_nonfin", df_nonfin_all),
