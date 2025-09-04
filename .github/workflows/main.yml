@@ -1,29 +1,36 @@
 name: TW50 Update
 
 on:
-  workflow_dispatch:    # 手動觸發
-  schedule:             # 自動排程（台北 08:30、20:30）
-    - cron: "30 0 * * *"   # UTC 00:30 = TPE 08:30
-    - cron: "30 12 * * *"  # UTC 12:30 = TPE 20:30
+  workflow_dispatch:
+  schedule:
+    # 每天台北時間 18:30 執行
+    - cron: '30 10 * * *'   # UTC+0 10:30 = Taipei 18:30
 
 jobs:
-  update-tw50:
+  build:
     runs-on: ubuntu-latest
-    concurrency:
-      group: tw50-update
-      cancel-in-progress: true
-    env:
-      GCP_SERVICE_ACCOUNT_JSON: ${{ secrets.GCP_SERVICE_ACCOUNT_JSON }}
+
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v3
+
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v4
         with:
-          python-version: "3.11"
+          python-version: '3.11'
+
       - name: Install dependencies
         run: |
-          pip install --upgrade pip
+          python -m pip install --upgrade pip
           pip install -r requirements.txt
+
       - name: Run TW50 script
-        run: python src/main.py
+        env:
+          SHEET_ID: ${{ secrets.SHEET_ID }}
+          GCP_SERVICE_ACCOUNT_JSON: ${{ secrets.GCP_SERVICE_ACCOUNT_JSON }}
+          FINNHUB_TOKEN: ${{ secrets.FINNHUB_TOKEN }}
+        run: |
+          echo "Has SHEET_ID? -> ${SHEET_ID:+yes}"
+          echo "Has GCP_SERVICE_ACCOUNT_JSON? -> ${GCP_SERVICE_ACCOUNT_JSON:+yes}"
+          echo "Has FINNHUB_TOKEN? -> ${FINNHUB_TOKEN:+yes}"
+          python -u src/main.py
