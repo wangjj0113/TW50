@@ -133,20 +133,50 @@ def rsi(series: pd.Series, period: int = 14) -> pd.Series:
 
 
 def indicators(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    安全版技術指標：
+    - 強制把 Close 壓成 1 維 Series（避免變成 (n,1) DataFrame）
+    - 所有中間計算都 .astype(float).squeeze()，確保是可寫入的 1 維
+    """
     out = df.copy()
-    close = out["Close"]
 
-    out["SMA20"]  = close.rolling(20).mean()
-    out["SMA50"]  = close.rolling(50).mean()
-    out["SMA200"] = close.rolling(200).mean()
+    # —— 取 Close，無論是 Series 或 (n,1) DataFrame 都壓成一維 Series ——
+    close_col = out["Close"]
+    if isinstance(close_col, pd.DataFrame):
+        close = close_col.iloc[:, 0].squeeze()
+    else:
+        close = pd.Series(close_col).squeeze()
 
-    out["RSI14"]  = rsi(close, 14)
+    close = pd.to_numeric(close, errors="coerce")  # 保險：轉數值
 
-    mid = out["SMA20"]
-    std = close.rolling(20).std()
+    # —— 移動均線 ——
+    sma20  = close.rolling(20).mean()
+    sma50  = close.rolling(50).mean()
+    sma200 = close.rolling(200).mean()
+
+    out["SMA20"]  = sma20.astype(float)
+    out["SMA50"]  = sma50.astype(float)
+    out["SMA200"] = sma200.astype(float)
+
+    # —— RSI14 ——
+    delta = close.diff()
+    gain = delta.where(delta > 0, 0).rolling(14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+    rs = gain / loss
+    out["RSI14"] = (100 - (100 / (1 + rs))).astype(float)
+
+    # —— 布林帶（用 SMA20 作為中軌）——
+    mid = out["SMA20"].astype(float).squeeze()
+    std = close.rolling(20).std().astype(float).squeeze()
+
+    bb_upper = (mid + 2 * std).astype(float)
+    bb_lower = (mid - 2 * std).astype(float)
+
+    # 寫回單欄位（保證是一維）
     out["BB_Mid"]   = mid
-    out["BB_Upper"] = mid + 2 * std
-    out["BB_Lower"] = mid - 2 * std
+    out["BB_Upper"] = bb_upper
+    out["BB_Lower"] = bb_lower
+
     return out
 
 
