@@ -1,17 +1,19 @@
 # -*- coding: utf-8 -*-
 """
-TW50 TOP5 — yfinance + TWSE 備援（強化寫入防呆版）
-版本：v2025-09-04-final
+TW50 TOP5 — yfinance + TWSE 備援（強化寫入防呆 + 勝率版訊號 + 交接本）
+版本：v2025-09-04-roadmap-volume
 
 Secrets（GitHub Actions）：
   - SHEET_ID
   - GCP_SERVICE_ACCOUNT_JSON
 
 輸出分頁：
-  - TW50_fin / TW50_nonfin / Top10_nonfin / Hot20_nonfin / Top5_hot20
+  - TW50_fin / TW50_nonfin / Top10_nonfin / Hot20_nonfin / Top5_hot20 / 交接本
+
 Top5_hot20 欄位：
-  股票代號、公司名稱、Date、收盤價、RSI14、訊號（買進/賣出/觀望）、
-  建議進場下界/上界、建議出場下界/上界、Open/High/Low/Volume/SMA20/SMA50/SMA200/BB_*
+  股票代號、公司名稱、Date、收盤價、RSI14、布林%b、訊號（買/賣/觀望）、
+  建議進場下界/上界、建議出場下界/上界、距離進場%、距離出場%、Volume、Vol20、
+  SMA20/50/200、BB_*
 """
 
 import os, json, time
@@ -63,22 +65,17 @@ def get_or_create(sh, title, rows=2000, cols=30):
 def sanitize_df(df: pd.DataFrame) -> pd.DataFrame:
     """轉成 Google Sheet 友善格式：日期→字串、Inf→NaN、NaN→None、欄名字串化"""
     out = df.copy()
-    # 日期欄位轉字串
     for c in out.columns:
         if np.issubdtype(out[c].dtype, np.datetime64):
             out[c] = out[c].astype(str)
-    # 無窮大→NaN
     out.replace([np.inf, -np.inf], np.nan, inplace=True)
-    # NaN→None
     out = out.where(pd.notnull(out), None)
-    # 欄名統一字串
     out.columns = [str(c) for c in out.columns]
     return out
 
 def upsert_df(ws, df, stamp_text):
     ws.clear()
-    # A1 一律以 2D list 寫入，避免 400
-    ws.update("A1", [[f"資料截至 (Asia/Taipei): {stamp_text}"]])
+    ws.update("A1", [[f"資料截至 (Asia/Taipei): {stamp_text}"]])   # A1 一律 2D list
     if df is None or df.empty:
         ws.update("A3", [["No Data"]])
         return
@@ -88,14 +85,19 @@ def upsert_df(ws, df, stamp_text):
 # ====== 指標 ======
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df = df.sort_index().copy()
+    # 均線
     df["SMA20"]  = df["Close"].rolling(20, min_periods=20).mean()
     df["SMA50"]  = df["Close"].rolling(50, min_periods=50).mean()
     df["SMA200"] = df["Close"].rolling(200, min_periods=200).mean()
+    # 成交量20MA
+    df["Vol20"] = df["Volume"].rolling(20, min_periods=20).mean()
+    # RSI14
     delta = df["Close"].diff()
     gain = delta.clip(lower=0).rolling(14, min_periods=14).mean()
     loss = (-delta.clip(upper=0)).rolling(14, min_periods=14).mean()
     rs = gain / loss.replace(0, np.nan)
     df["RSI14"] = 100 - (100 / (1 + rs))
+    # 布林
     mid = df["Close"].rolling(20, min_periods=20).mean()
     std = df["Close"].rolling(20, min_periods=20).std()
     df["BB_Mid"]   = mid
@@ -169,9 +171,41 @@ def fetch_history_with_fallback(ticker: str) -> pd.DataFrame | None:
     print(f"[INFO] yfinance 無資料 → 改用 TWSE：{ticker}")
     return fetch_twse_history(ticker, months=12)
 
+# ====== 交接本分頁 ======
+def update_roadmap(sh, stamp):
+    ws = get_or_create(sh, "交接本", rows=200, cols=8)
+    rows = []
+    rows.append([f"交接本（自動更新）｜最後更新：{stamp}"])
+    rows.append([])
+    rows.append(["已完成 ✅","說明"])
+    rows += [
+        ["GitHub Actions 自動化","每日自動抓 TW50 寫入 Google Sheet"],
+        ["技術指標","SMA20/50/200、RSI14、布林通道、Vol20"],
+        ["分頁","TW50_fin / TW50_nonfin / Top10_nonfin / Hot20_nonfin / Top5_hot20"],
+        ["防呆機制","yfinance→TWSE 備援；抓不到自動跳過；寫入前資料消毒"],
+    ]
+    rows.append([])
+    rows.append(["進行中 🛠","說明"])
+    rows += [
+        ["勝率提升","訊號需同時滿足：成交量≥20日均量 ＋（RSI≤40 或 布林%b≤0.10）/（RSI≥60 或 布林%b≥0.90）"],
+        ["公司名稱補齊","代號↔中文名稱保底不空白"],
+        ["說明分頁","各分頁定義＋金融股解讀（偏存股、技術面僅參考）"],
+    ]
+    rows.append([])
+    rows.append(["未來 🚀","說明"])
+    rows += [
+        ["籌碼面","外資／投信／自營商買賣超搭配技術面"],
+        ["基本面","EPS、殖利率過濾弱勢標的"],
+        ["自動通知","LINE / Email 每日 Top5 訊號"],
+        ["即時化","盤中更新（需券商 API / 付費數據）"],
+        ["至尊版","技術＋籌碼＋基本面 → 多空分數、Dashboard"],
+    ]
+    ws.clear()
+    ws.update("A1", rows)
+
 # ====== 主流程 ======
 def main():
-    print("== TW50 TOP5（yfinance + TWSE fallback）==")
+    print("== TW50 TOP5（yfinance + TWSE fallback + 勝率版訊號 + 交接本）==")
     sh = get_sheet()
     stamp = taipei_now_str()
 
@@ -212,7 +246,7 @@ def main():
     df_nonfin = df_all[~is_fin].copy()
 
     # 全量欄位
-    base_cols = ["股票代號","公司名稱","Date","Open","High","Low","Close","Volume",
+    base_cols = ["股票代號","公司名稱","Date","Open","High","Low","Close","Volume","Vol20",
                  "RSI14","SMA20","SMA50","SMA200","BB_Lower","BB_Mid","BB_Upper"]
     base_cols = [c for c in base_cols if c in df_all.columns]
     df_fin_all    = df_fin[base_cols].copy()
@@ -224,26 +258,52 @@ def main():
     # Hot20（非金）：成交量最高 20
     hot20 = df_nonfin.sort_values("Volume", ascending=False).head(20).copy()
 
-    # Top5 from Hot20 + 訊號 + 區間
+    # Top5 from Hot20（加入更高勝率訊號）
     top5 = hot20.sort_values(["RSI14","Volume"], ascending=[False, False]).head(5).copy()
 
-    def signal(row):
-        if pd.notna(row["RSI14"]) and pd.notna(row["BB_Lower"]) and row["RSI14"] < 40 and row["Close"] <= row["BB_Lower"]:
-            return "買進"
-        if pd.notna(row["RSI14"]) and pd.notna(row["BB_Upper"]) and row["RSI14"] > 60 and row["Close"] >= row["BB_Upper"]:
-            return "賣出"
-        return "觀望"
+    # 布林%b（0=貼近下軌、1=貼近上軌）
+    bb_range = (top5["BB_Upper"] - top5["BB_Lower"]).replace(0, np.nan)
+    top5["BB_percent"] = (top5["Close"] - top5["BB_Lower"]) / bb_range
 
-    top5["訊號"] = top5.apply(signal, axis=1)
+    # —— 勝率提升：成交量過濾（Volume 必須 ≥ Vol20）——
+    def signal_with_volume(r):
+        vol_ok = pd.notna(r.get("Vol20")) and pd.notna(r.get("Volume")) and (r["Volume"] >= r["Vol20"])
+        if vol_ok:
+            if (pd.notna(r["BB_percent"]) and r["BB_percent"] <= 0.10) or (pd.notna(r["RSI14"]) and r["RSI14"] <= 40):
+                return "買進"
+            if (pd.notna(r["BB_percent"]) and r["BB_percent"] >= 0.90) or (pd.notna(r["RSI14"]) and r["RSI14"] >= 60):
+                return "賣出"
+        return "觀望"
+    top5["訊號"] = top5.apply(signal_with_volume, axis=1)
+
+    # 進/出場區間（布林下~中 / 中~上）
     top5["建議進場下界"] = top5["BB_Lower"]
     top5["建議進場上界"] = top5["BB_Mid"]
     top5["建議出場下界"] = top5["BB_Mid"]
     top5["建議出場上界"] = top5["BB_Upper"]
 
-    top5_cols = ["股票代號","公司名稱","Date","Close","RSI14","訊號",
-                 "建議進場下界","建議進場上界","建議出場下界","建議出場上界",
-                 "Open","High","Low","Volume","SMA20","SMA50","SMA200","BB_Lower","BB_Mid","BB_Upper"]
-    top5_out = top5[[c for c in top5_cols if c in top5.columns]].rename(columns={"Close":"收盤價"})
+    # 與進/出場「距離%」
+    top5["距離進場%"] = np.where(
+        top5["Close"] <= top5["BB_Mid"],
+        (top5["Close"] - top5["BB_Lower"]) / top5["Close"] * 100,
+        0.0
+    )
+    top5["距離出場%"] = np.where(
+        top5["Close"] >= top5["BB_Mid"],
+        (top5["BB_Upper"] - top5["Close"]) / top5["Close"] * 100,
+        0.0
+    )
+
+    # Top5 欄位輸出（中文）
+    top5_cols = [
+        "股票代號","公司名稱","Date","Close","RSI14","BB_percent","訊號",
+        "建議進場下界","建議進場上界","建議出場下界","建議出場上界",
+        "距離進場%","距離出場%","Volume","Vol20",
+        "Open","High","Low","SMA20","SMA50","SMA200","BB_Lower","BB_Mid","BB_Upper"
+    ]
+    top5_out = top5[[c for c in top5_cols if c in top5.columns]].rename(
+        columns={"Close":"收盤價","BB_percent":"布林%b"}
+    )
 
     # 寫入各分頁（全面防呆）
     for title, data in [
@@ -256,6 +316,9 @@ def main():
         ws = get_or_create(sh, title)
         upsert_df(ws, data, stamp)
         time.sleep(0.25)
+
+    # 交接本
+    update_roadmap(sh, stamp)
 
     if failed:
         print("[WARN] 這些代號找不到資料 → 已跳過：", ", ".join(failed))
