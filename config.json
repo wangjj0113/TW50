@@ -8,7 +8,7 @@
     "9910.TW","2603.TW","2609.TW","2615.TW","2633.TW","2898.TW","1402.TW",
     "1590.TW","2379.TW","2382.TW","2395.TW","2408.TW","3006.TW","3481.TW"
   ],
-  "sheet_id": "在這裡換成妳自己的表ID",
+  "sheet_id": "1bbayENgn4ZuQ5ltKV_7twO1kC3GlYg6vj_DKGw2oHXY",
   "mode": "prod",
   "sheets": {
     "prod": { "tw50": "TW50", "top10": "Top10" },
