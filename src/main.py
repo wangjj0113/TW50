@@ -1,15 +1,16 @@
 # -*- coding: utf-8 -*-
 """
-TW50 / Top10 自動化主程式（安全寫入 + 中文名稱 + Top10欄位排序 + 防呆MultiIndex）
+TW50 / Top10 自動化主程式（安全寫入 + 中文名稱 + Top10欄位排序 + 防呆MultiIndex + 驗證閘門）
 - 指標：SMA20/50/200、RSI14、Bollinger(20)
 - Top10：依 RSI14↓、Volume↓ 排序；優先顯示 Ticker/Name/Close/RSI14/Volume 與建議進出場
 - A1：台北時區時間戳
-- 防呆：就算誤把多檔代號寫成一個字串，亦能攤平或抽出第一檔避免 'Volume not unique'
+- 防呆：處理 yfinance 多檔誤用造成的 MultiIndex
+- 驗證：寫入前執行資料健檢；通過才寫入 prod，否則改寫入 dev 並輸出 QA 報告
 """
 
 import os
 import json
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 import numpy as np
 import pandas as pd
@@ -18,9 +19,7 @@ import yfinance as yf
 import gspread
 from gspread_dataframe import set_with_dataframe
 
-
 # ========= 股票名稱對照 =========
-
 TICKER_NAME_MAP = {
     "2330.TW": "台積電", "2317.TW": "鴻海",   "6505.TW": "台塑化", "2454.TW": "聯發科",
     "2412.TW": "中華電", "2881.TW": "富邦金", "2882.TW": "國泰金", "2308.TW": "台達電",
@@ -37,59 +36,49 @@ TICKER_NAME_MAP = {
     "3481.TW": "群創"
 }
 
-
 # ========= 基本設定 =========
-
 def load_config(cfg_path: str = "config.json") -> Dict:
     with open(cfg_path, "r", encoding="utf-8") as f:
         cfg = json.load(f)
+    # 既有預設
     cfg.setdefault("mode", "prod")
     cfg.setdefault("period", "12mo")
     cfg.setdefault("interval", "1d")
     if "sheets" not in cfg:
         cfg["sheets"] = {"prod": cfg.get("prod", {}), "dev": cfg.get("dev", {})}
+    cfg["sheets"].setdefault("prod", {"tw50": "TW50", "top10": "Top10"})
+    cfg["sheets"].setdefault("dev", {"tw50": "TW50_dev", "top10": "Top10_dev"})
+    # 驗證預設
+    cfg.setdefault("validation", {})
+    v = cfg["validation"]
+    v.setdefault("max_days_lag", 7)            # 最近一筆資料不得早於現在 N 天以上（含週末/休市彈性）
+    v.setdefault("allow_missing_ratio", 0.1)   # 允許最多 10% ticker 缺資料
+    v.setdefault("strict", True)               # 嚴格模式：不通過就不寫 prod（自動改寫 dev）
+    v.setdefault("write_qa_sheet", True)       # 產出 QA 報告分頁
+    v.setdefault("qa_sheet_title", "QA_Report")
     return cfg
-
 
 def taipei_now_str() -> str:
     return pd.Timestamp.now(tz="Asia/Taipei").strftime("%Y-%m-%d %H:%M")
 
-
-# ========= 指標計算 =========
-
+# ========= 資料抓取與指標 =========
 def fetch_history(ticker: str, period: str, interval: str) -> pd.DataFrame:
-    """
-    盡量以「單一代號」抓；若誤傳多檔（導致 MultiIndex），自動抽出第一檔避免 Volume 重複造成錯誤。
-    """
+    """盡量以單一代號抓；若誤傳多檔（導致 MultiIndex），抽第一檔避免 'Volume not unique'。"""
     df = yf.download(ticker, period=period, interval=interval, auto_adjust=False, progress=False)
-
-    # 若回來是 MultiIndex 欄位（通常是一次抓多檔），處理一下
     if isinstance(df.columns, pd.MultiIndex):
-        # 第二層通常是代號
         level1_vals = list(df.columns.levels[1])
-        # 若只有一個代號 → 直接抽那一層
-        if len(level1_vals) == 1:
-            df = df.xs(level1_vals[0], axis=1, level=1)
-        else:
-            # 多個代號被塞進來（大概率是 tickers 誤傳為單一字串）
-            # 抽第一個代號，避免 'Volume' label not unique
-            pick = level1_vals[0]
-            df = df.xs(pick, axis=1, level=1)
-
-    # 統一欄位命名
+        pick = level1_vals[0]
+        df = df.xs(pick, axis=1, level=1)
     df = df.rename(columns=str.title)  # open/close → Open/Close
     df.index.name = "Date"
     return df
 
-
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
-
     # SMA
     out["SMA20"] = out["Close"].rolling(window=20, min_periods=1).mean()
     out["SMA50"] = out["Close"].rolling(window=50, min_periods=1).mean()
     out["SMA200"] = out["Close"].rolling(window=200, min_periods=1).mean()
-
     # RSI14
     delta = out["Close"].diff()
     gain = delta.clip(lower=0.0)
@@ -99,16 +88,13 @@ def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     rs = avg_gain / (avg_loss.replace(0, np.nan))
     out["RSI14"] = 100 - (100 / (1 + rs))
     out["RSI14"] = out["RSI14"].fillna(method="bfill")
-
     # Bollinger(20)
     mid = out["Close"].rolling(window=20, min_periods=1).mean()
     std = out["Close"].rolling(window=20, min_periods=1).std(ddof=0)
     out["BB_Mid"] = mid
     out["BB_Upper"] = mid + 2 * std
     out["BB_Lower"] = mid - 2 * std
-
     return out
-
 
 def build_tw50_table(tickers: List[str], period: str, interval: str) -> pd.DataFrame:
     frames = []
@@ -120,13 +106,10 @@ def build_tw50_table(tickers: List[str], period: str, interval: str) -> pd.DataF
         ind.insert(0, "Ticker", tk)
         ind.insert(1, "Name", TICKER_NAME_MAP.get(tk, ""))
         frames.append(ind.reset_index())
-
     if not frames:
         return pd.DataFrame()
-
     df_all = pd.concat(frames, axis=0, ignore_index=True)
-
-    # 統一欄位順序（便於閱讀）
+    # 統一欄序
     pref = [
         "Date", "Ticker", "Name", "Close", "RSI14", "Volume",
         "SMA20", "SMA50", "SMA200",
@@ -139,29 +122,22 @@ def build_tw50_table(tickers: List[str], period: str, interval: str) -> pd.DataF
     df_all = df_all[pref].sort_values(["Date", "Ticker"]).reset_index(drop=True)
     return df_all
 
-
 def build_top10(df_tw50: pd.DataFrame) -> pd.DataFrame:
     if df_tw50.empty:
         return pd.DataFrame()
-
-    # 每檔最後一筆
     last_by_ticker = (
         df_tw50.sort_values(["Ticker", "Date"])
                .groupby("Ticker", as_index=False)
                .tail(1)
                .reset_index(drop=True)
     )
-
-    # 建議進/出場（基於布林）
-    last_by_ticker["Entry_Low"] = last_by_ticker["BB_Lower"]
+    # 建議區間（布林帶）
+    last_by_ticker["Entry_Low"]  = last_by_ticker["BB_Lower"]
     last_by_ticker["Entry_High"] = last_by_ticker["BB_Mid"]
-    last_by_ticker["Exit_Low"] = last_by_ticker["BB_Mid"]
-    last_by_ticker["Exit_High"] = last_by_ticker["BB_Upper"]
-
+    last_by_ticker["Exit_Low"]   = last_by_ticker["BB_Mid"]
+    last_by_ticker["Exit_High"]  = last_by_ticker["BB_Upper"]
     ranked = last_by_ticker.sort_values(["RSI14", "Volume"], ascending=[False, False]).copy()
     top10 = ranked.head(10).copy()
-
-    # Top10 欄位順序（優先顯示重點）
     top_cols = [
         "Date", "Ticker", "Name", "Close", "RSI14", "Volume",
         "Entry_Low", "Entry_High", "Exit_Low", "Exit_High",
@@ -173,20 +149,79 @@ def build_top10(df_tw50: pd.DataFrame) -> pd.DataFrame:
             top10[c] = np.nan
     return top10[top_cols].reset_index(drop=True)
 
+# ========= 驗證（Validation Gate） =========
+def validate_data(df_tw50: pd.DataFrame, tickers: List[str], rules: Dict) -> Tuple[bool, pd.DataFrame]:
+    """
+    回傳 (是否通過, QA報告DataFrame)
+    規則：
+      - 最近日期不得落後 now 超過 max_days_lag
+      - 缺資料的 ticker 比例不得超過 allow_missing_ratio
+      - 重要欄位不得大量 NaN
+      - 數值合理性：Volume>=0、RSI14 在 [0,100] 範圍
+    """
+    qa_rows = []
+    now = pd.Timestamp.now(tz="Asia/Taipei").normalize()
+    max_days_lag = int(rules.get("max_days_lag", 7))
+    allow_missing_ratio = float(rules.get("allow_missing_ratio", 0.1))
+
+    total = len(tickers)
+    present = df_tw50["Ticker"].nunique() if not df_tw50.empty else 0
+    missing = sorted(list(set(tickers) - set(df_tw50["Ticker"].unique()))) if present else tickers
+
+    # 每檔最後日期
+    lag_violations = []
+    rsi_violations = 0
+    vol_violations = 0
+    nan_heavy = 0
+
+    if not df_tw50.empty:
+        last = (df_tw50.sort_values(["Ticker","Date"])
+                        .groupby("Ticker").tail(1))
+        last["Date"] = pd.to_datetime(last["Date"])
+        last["lag_days"] = (now.tz_localize(None) - last["Date"]).dt.days
+
+        # 日期落後
+        lag_violations = last.loc[last["lag_days"] > max_days_lag, ["Ticker","Name","Date","lag_days"]].to_dict("records")
+
+        # RSI/Volume 範圍
+        rsi_bad = last[(last["RSI14"] < 0) | (last["RSI14"] > 100) | (last["RSI14"].isna())]
+        rsi_violations = len(rsi_bad)
+
+        vol_bad = last[(last["Volume"] < 0) | (last["Volume"].isna())]
+        vol_violations = len(vol_bad)
+
+        # 關鍵欄位大量缺失（以 Close/RSI14/BB_* 粗查）
+        required_cols = ["Close","RSI14","BB_Lower","BB_Mid","BB_Upper"]
+        na_rate = df_tw50[required_cols].isna().mean().mean()
+        if na_rate > 0.2:  # 超過 20% 缺失
+            nan_heavy = 1
+
+    # 產 QA summary
+    qa_rows.append({"Check": "tickers_total", "Value": total, "Detail": ""})
+    qa_rows.append({"Check": "tickers_present", "Value": present, "Detail": ""})
+    qa_rows.append({"Check": "tickers_missing", "Value": len(missing), "Detail": ", ".join(missing[:20]) + ("..." if len(missing)>20 else "")})
+    qa_rows.append({"Check": "lag_violations", "Value": len(lag_violations), "Detail": str(lag_violations[:5]) + ("..." if len(lag_violations)>5 else "")})
+    qa_rows.append({"Check": "rsi_violations", "Value": rsi_violations, "Detail": ""})
+    qa_rows.append({"Check": "volume_violations", "Value": vol_violations, "Detail": ""})
+    qa_rows.append({"Check": "nan_heavy", "Value": nan_heavy, "Detail": "NA rate > 20% on key cols" if nan_heavy else ""})
+
+    # 判定
+    missing_ratio_ok = (len(missing) / max(total,1)) <= allow_missing_ratio
+    pass_flag = (len(lag_violations) == 0) and (rsi_violations == 0) and (vol_violations == 0) and missing_ratio_ok and (nan_heavy == 0)
+
+    qa_df = pd.DataFrame(qa_rows)
+    return pass_flag, qa_df
 
 # ========= Google Sheets 安全寫入 =========
-
 def get_gspread_client():
     try:
         return gspread.service_account()
     except Exception:
-        # 也支援從環境變數字串載入 service account JSON
         json_str = os.environ.get("GCP_SERVICE_ACCOUNT_JSON", "")
         if json_str:
             import json as _json
             return gspread.service_account_from_dict(_json.loads(json_str))
         raise
-
 
 def safe_replace_worksheet(sh, target_title: str, df: pd.DataFrame, note_time: str):
     temp_title = f"{target_title}__tmp"
@@ -196,30 +231,29 @@ def safe_replace_worksheet(sh, target_title: str, df: pd.DataFrame, note_time: s
         sh.del_worksheet(ws_tmp_old)
     except gspread.WorksheetNotFound:
         pass
-
     # 新建 tmp
     ws_tmp = sh.add_worksheet(title=temp_title, rows=100, cols=26)
     ws_tmp.update_acell("A1", f"Last update (Asia/Taipei): {note_time}")
     ws_tmp.update_acell("A2", "")
-
     # 內容從第 3 列開始
     if not df.empty:
         set_with_dataframe(ws_tmp, df, row=3, include_index=False, include_column_header=True, resize=True)
     else:
         ws_tmp.update_acell("A3", "No Data")
-
     # 刪舊 → 改名
     try:
         ws_old = sh.worksheet(target_title)
         sh.del_worksheet(ws_old)
     except gspread.WorksheetNotFound:
         pass
-
     ws_tmp.update_title(target_title)
 
+def write_qa_sheet(sh, qa_df: pd.DataFrame, title: str, note_time: str):
+    if qa_df is None or qa_df.empty:
+        return
+    safe_replace_worksheet(sh, title, qa_df, note_time)
 
 # ========= 主流程 =========
-
 def main():
     cfg = load_config()
     tickers = cfg.get("tickers", [])
@@ -231,25 +265,53 @@ def main():
         raise RuntimeError("config.json 的 sheet_id 尚未填入姐的 Google Sheet ID。")
 
     mode = cfg.get("mode", "prod")
-    sheets = cfg["sheets"][mode]
-    tw50_title = sheets.get("tw50", "TW50")
-    top10_title = sheets.get("top10", "Top10")
+    sheets = cfg["sheets"]
+    prod_names = sheets["prod"]
+    dev_names  = sheets["dev"]
 
     period = cfg.get("period", "12mo")
     interval = cfg.get("interval", "1d")
 
+    print(f"[INFO] MODE={mode} | period={period} interval={interval}")
+    print(f"[INFO] Tickers ({len(tickers)}): {tickers[:8]}{'...' if len(tickers)>8 else ''}")
+
+    # 1) 產出 TW50 / Top10
     df_tw50 = build_tw50_table(tickers, period, interval)
     df_top10 = build_top10(df_tw50)
 
+    # 2) 驗證
+    pass_flag, qa_df = validate_data(df_tw50, tickers, cfg["validation"])
+    print("\n[QA] Summary\n", qa_df.to_string(index=False), "\n")
+    if pass_flag:
+        print("[QA] ✅ 驗證通過：可寫入 prod")
+    else:
+        print("[QA] ❌ 驗證未通過：將寫入 dev，避免污染 prod")
+
+    # 3) 寫入 Google Sheets（安全覆寫）
     client = get_gspread_client()
+    try:
+        sa_email = getattr(client.auth, "service_account_email", "unknown")
+        print(f"[INFO] Using Service Account: {sa_email}")
+    except Exception:
+        pass
+
     sh = client.open_by_key(sheet_id)
     stamp = taipei_now_str()
+
+    # 選擇寫入目標（通過→prod；不通過→dev）
+    target = prod_names if pass_flag or not cfg["validation"]["strict"] else dev_names
+    tw50_title = target.get("tw50", "TW50")
+    top10_title = target.get("top10", "Top10")
 
     safe_replace_worksheet(sh, tw50_title, df_tw50, stamp)
     safe_replace_worksheet(sh, top10_title, df_top10, stamp)
 
-    print("[INFO] All done.")
+    # QA 報告
+    if cfg["validation"].get("write_qa_sheet", True):
+        qa_title = cfg["validation"].get("qa_sheet_title", "QA_Report")
+        write_qa_sheet(sh, qa_df, qa_title, stamp)
 
+    print("[INFO] All done.")
 
 if __name__ == "__main__":
     main()
