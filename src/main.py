@@ -2,9 +2,9 @@
 """
 TW50 / Top10 主程式（Secrets優先 + 中文名稱 + 指標 + Top10 + 驗證閘門 + 安全覆寫）
 - 指標：SMA20/50/200、RSI14、Bollinger(20)
-- Top10：依 RSI14↓、Volume↓ 排序，附建議進/出場(布林帶)
-- 安全：gspread 先讀 GCP_SERVICE_ACCOUNT_JSON（GitHub Secrets），缺才回退本地檔
-- 驗證：資料健檢不過→寫入 dev 並產生 QA 報告；通過→寫入 prod
+- Top10：依 RSI14↓、Volume↓ 排序，附布林帶進/出場建議
+- 安全：gspread 先讀 GitHub Secrets 環境變數 GCP_SERVICE_ACCOUNT_JSON，缺才回退本地檔
+- 驗證：資料健檢通過→寫 prod；未過→寫 dev 並輸出 QA_Report
 """
 
 import os
@@ -104,7 +104,7 @@ def build_tw50_table(tickers: List[str], period: str, interval: str) -> pd.DataF
     frames = []
     for tk in tickers:
         raw = fetch_history(tk, period, interval)
-        if raw.empty:  # 抓不到就跳過
+        if raw.empty:
             continue
         ind = add_indicators(raw)
         ind.insert(0, "Ticker", tk)
@@ -115,7 +115,6 @@ def build_tw50_table(tickers: List[str], period: str, interval: str) -> pd.DataF
         return pd.DataFrame()
 
     df_all = pd.concat(frames, ignore_index=True)
-    # 欄位順序
     pref = [
         "Date", "Ticker", "Name", "Close", "RSI14", "Volume",
         "SMA20", "SMA50", "SMA200",
@@ -197,12 +196,12 @@ def validate_data(df_tw50: pd.DataFrame, tickers: List[str], rules: Dict) -> Tup
 
 # ========= Google Sheets 安全寫入 =========
 def get_gspread_client():
-    """優先用 GitHub Secrets (GCP_SERVICE_ACCOUNT_JSON)，沒有才回退本地檔。"""
+    """✅ 優先用 GitHub Secrets (GCP_SERVICE_ACCOUNT_JSON)；沒有再回退本地檔。"""
     json_str = os.environ.get("GCP_SERVICE_ACCOUNT_JSON", "")
     if json_str:
         import json as _json
         return gspread.service_account_from_dict(_json.loads(json_str))
-    return gspread.service_account()  # 本地 service_account.json（本機調試時可用）
+    return gspread.service_account()  # 僅本機開發時可用
 
 
 def safe_replace_worksheet(sh, target_title: str, df: pd.DataFrame, note_time: str):
@@ -276,7 +275,7 @@ def main():
     if cfg["validation"].get("write_qa_sheet", True):
         write_qa_sheet(sh, qa_df, cfg["validation"].get("qa_sheet_title","QA_Report"), stamp)
 
-    # 4) Log 中印 Top10 摘要（方便快速驗收）
+    # 4) Log 中印 Top10 摘要（便於驗收）
     try:
         cols = ["Ticker","Name","Close","RSI14","Volume","Entry_Low","Entry_High","Exit_Low","Exit_High"]
         pv = df_top10[cols].copy()
